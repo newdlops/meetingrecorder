@@ -1,0 +1,415 @@
+:root {
+  color: #1c2526;
+  background: #eef2f3;
+  font-family:
+    Inter, Pretendard, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 900px;
+  min-height: 100vh;
+  background: #eef2f3;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled,
+input:disabled {
+  cursor: not-allowed;
+  opacity: 0.58;
+}
+
+.appShell {
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  min-height: 100vh;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  padding: 28px 18px;
+  background: #f9fbfb;
+  border-right: 1px solid #d9e2e4;
+}
+
+.brandBlock {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 0 8px;
+}
+
+.brandMark {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  background: #1f7a8c;
+  box-shadow: inset 0 -8px 0 #f2b84b;
+}
+
+.brandBlock h1,
+.brandBlock p,
+.panelTitle h2,
+.recordingMeter p,
+.recordingMeter strong,
+.transcriptSegment p {
+  margin: 0;
+}
+
+.brandBlock h1 {
+  font-size: 20px;
+  line-height: 1.2;
+}
+
+.brandBlock p {
+  color: #627174;
+  font-size: 13px;
+}
+
+.sessionList {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+  overflow: auto;
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 8px 4px;
+  color: #526265;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.sectionHeader strong {
+  color: #1f7a8c;
+}
+
+.sessionItem {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr);
+  gap: 10px;
+  width: 100%;
+  padding: 14px 12px;
+  color: #263234;
+  text-align: left;
+  background: #ffffff;
+  border: 1px solid #dfe7e9;
+  border-radius: 8px;
+}
+
+.sessionItem:hover,
+.sessionItem.selected {
+  border-color: #1f7a8c;
+  background: #edf7f9;
+}
+
+.sessionMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+
+.sessionMeta strong,
+.sessionMeta small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionMeta small {
+  color: #637174;
+  font-size: 12px;
+}
+
+.workspace {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+  padding: 28px;
+}
+
+.recorderPanel {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  gap: 18px;
+  align-items: center;
+  padding: 20px;
+  background: #ffffff;
+  border: 1px solid #d9e2e4;
+  border-radius: 8px;
+}
+
+.recordingMeter {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+}
+
+.recordDot {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #92a0a3;
+}
+
+.recordDot.active {
+  background: #c43d3d;
+  box-shadow: 0 0 0 6px rgba(196, 61, 61, 0.14);
+}
+
+.eyebrow {
+  color: #627174;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.recordingMeter strong {
+  display: block;
+  margin-top: 3px;
+  font-size: 30px;
+  line-height: 1.1;
+}
+
+.recorderActions {
+  display: flex;
+  gap: 10px;
+}
+
+.primaryButton,
+.dangerButton,
+.ghostButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 8px;
+  font-weight: 700;
+}
+
+.primaryButton {
+  color: #ffffff;
+  background: #1f7a8c;
+  border: 1px solid #1f7a8c;
+}
+
+.dangerButton {
+  color: #ffffff;
+  background: #b84b4b;
+  border: 1px solid #b84b4b;
+}
+
+.ghostButton {
+  color: #1f7a8c;
+  background: #ffffff;
+  border: 1px solid #c9d8db;
+}
+
+.errorText {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: #a43636;
+  font-size: 14px;
+}
+
+.contentGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 280px;
+  gap: 20px;
+  min-height: 0;
+}
+
+.transcriptPanel,
+.speakerPanel {
+  min-height: 0;
+  padding: 20px;
+  background: #ffffff;
+  border: 1px solid #d9e2e4;
+  border-radius: 8px;
+}
+
+.transcriptPanel {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 166px);
+}
+
+.speakerPanel {
+  height: fit-content;
+}
+
+.panelTitle,
+.transcriptTitle,
+.transcriptTitle > div {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+}
+
+.panelTitle {
+  margin-bottom: 18px;
+}
+
+.transcriptTitle {
+  justify-content: space-between;
+}
+
+.panelTitle h2 {
+  overflow: hidden;
+  font-size: 18px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.emptyText {
+  margin: 0;
+  color: #6b787b;
+  font-size: 14px;
+}
+
+.transcriptList {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.transcriptSegment {
+  padding: 14px 14px 14px 16px;
+  border-left: 4px solid var(--speaker-color);
+  border-radius: 8px;
+  background: #f7faf9;
+}
+
+.segmentHeader {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 7px;
+  color: #536164;
+  font-size: 13px;
+}
+
+.segmentHeader strong {
+  color: #1c2526;
+}
+
+.segmentHeader em {
+  padding: 2px 7px;
+  color: #825400;
+  font-style: normal;
+  font-weight: 700;
+  background: #fff3d2;
+  border-radius: 999px;
+}
+
+.transcriptSegment p {
+  color: #263234;
+  line-height: 1.55;
+}
+
+.speakerList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.speakerRow {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.speakerSwatch {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+}
+
+.speakerRow input {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 11px;
+  color: #243133;
+  background: #f8fbfb;
+  border: 1px solid #cedbdd;
+  border-radius: 8px;
+}
+
+.speakerRow input:focus {
+  outline: 2px solid rgba(31, 122, 140, 0.26);
+  border-color: #1f7a8c;
+}
+
+.spin {
+  animation: spin 0.9s linear infinite;
+}
+
+@keyframes spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (max-width: 980px) {
+  body {
+    min-width: 0;
+  }
+
+  .appShell {
+    grid-template-columns: 1fr;
+  }
+
+  .sidebar {
+    max-height: 280px;
+    border-right: 0;
+    border-bottom: 1px solid #d9e2e4;
+  }
+
+  .contentGrid,
+  .recorderPanel {
+    grid-template-columns: 1fr;
+  }
+
+  .transcriptPanel {
+    height: auto;
+    min-height: 360px;
+  }
+
+  .recorderActions {
+    flex-wrap: wrap;
+  }
+}

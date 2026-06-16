@@ -1,0 +1,16 @@
+node_modules/
+dist/
+out/
+release/
+.DS_Store
+.env
+.env.*
+.codeidx/
+.lh/
+.zoek-rs/
+__pycache__/
+.venv-stt/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
