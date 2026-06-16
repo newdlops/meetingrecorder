@@ -3,59 +3,81 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
 import ffmpegPath from 'ffmpeg-static';
-import type {
-  OfflineTranscriptionRequest,
-  OfflineTranscriptionResult,
-  TranscriptionProgressEvent,
-  TranscriptionProgressStage
-} from '../shared/types';
+import type { OfflineTranscriptionRequest, OfflineTranscriptionResult } from '../shared/types';
+import { PersistentTranscriptionWorker, type ProgressCallback } from './persistentTranscriptionWorker';
 
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_STT_LANGUAGE = 'ko';
 const DEFAULT_STT_TASK = 'transcribe';
-// 미리보기 작업은 백그라운드에서 낮은 자원 사용량으로 실행한다.
 const DEFAULT_PREVIEW_BATCH_SIZE = '2';
-const DEFAULT_PREVIEW_THREAD_COUNT = '2';
+const DEFAULT_PERSISTENT_THREAD_COUNT = '2';
 
-type ProgressCallback = (progress: TranscriptionProgressEvent) => void;
-
-// WhisperX 기반 Python worker를 실행해 오프라인 전사/화자분리 결과를 만든다.
+// WhisperX 기반 Python 상주 worker를 통해 오프라인 전사/화자분리 결과를 만든다.
 export class LocalTranscriptionService {
+  private persistentWorker?: PersistentTranscriptionWorker;
+
   constructor(private readonly appRoot = app.getAppPath()) {}
 
-  // 렌더러에서 받은 오디오 바이트를 임시 파일로 저장한 뒤 worker에 전달한다.
+  // 앱 시작 후 백그라운드에서 모델을 미리 올린다.
+  async warmUp(): Promise<void> {
+    await this.getPersistentWorker().warmUp();
+  }
+
+  // 앱 종료 시 상주 worker 프로세스를 함께 종료한다.
+  shutdown(): void {
+    this.persistentWorker?.shutdown();
+  }
+
+  // 렌더러에서 받은 오디오 바이트를 임시 파일로 저장한 뒤 상주 worker에 전달한다.
   async transcribe(
     request: OfflineTranscriptionRequest,
     onProgress?: ProgressCallback
   ): Promise<OfflineTranscriptionResult> {
     const tempDirectory = await mkdtemp(path.join(tmpdir(), 'meeting-recorder-'));
     const audioPath = path.join(tempDirectory, this.getAudioFileName(request.audioMimeType));
+    const isPreviewRequest = request.mode === 'preview';
 
     try {
       await writeFile(audioPath, Buffer.from(request.audioData));
-      return await this.runWorker(audioPath, request, onProgress);
+      return await this.getPersistentWorker().transcribe(
+        {
+          request,
+          audioPath,
+          transcribeOnly: isPreviewRequest,
+          batchSize: this.getBatchSize(isPreviewRequest),
+          minSpeakers: request.minSpeakers,
+          maxSpeakers: request.maxSpeakers
+        },
+        onProgress
+      );
     } finally {
       await rm(tempDirectory, { recursive: true, force: true });
     }
   }
 
-  // Python worker 실행 인자를 구성하고 JSON 결과를 파싱한다.
-  private async runWorker(
-    audioPath: string,
-    request: OfflineTranscriptionRequest,
-    onProgress?: ProgressCallback
-  ): Promise<OfflineTranscriptionResult> {
-    const pythonPath = this.getPythonPath();
-    const workerPath = this.getWorkerPath();
-    const timeout = Number(process.env.MEETING_RECORDER_STT_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
-    const assetRoot = this.getEngineAssetRoot();
-    const isPreviewRequest = request.mode === 'preview';
+  // 상주 worker 인스턴스를 지연 생성해 같은 Python 프로세스를 계속 재사용한다.
+  private getPersistentWorker(): PersistentTranscriptionWorker {
+    if (!this.persistentWorker) {
+      this.persistentWorker = new PersistentTranscriptionWorker(async () => {
+        const assetRoot = this.getEngineAssetRoot();
+
+        return {
+          pythonPath: this.getPythonPath(),
+          workerPath: this.getPersistentWorkerPath(),
+          args: this.createPersistentWorkerArgs(assetRoot),
+          env: await this.createWorkerEnvironment(),
+          timeout: Number(process.env.MEETING_RECORDER_STT_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS)
+        };
+      });
+    }
+
+    return this.persistentWorker;
+  }
+
+  // 상주 worker가 모델을 한 번 로드할 때 필요한 실행 인자를 구성한다.
+  private createPersistentWorkerArgs(assetRoot: string): string[] {
     const args = [
-      workerPath,
-      '--audio',
-      audioPath,
       '--model',
       this.getWhisperModelPath(assetRoot),
       '--device',
@@ -72,131 +94,22 @@ export class LocalTranscriptionService {
       process.env.MEETING_RECORDER_STT_MODEL_DIR ?? path.join(assetRoot, 'whisper')
     ];
 
-    if (isPreviewRequest) {
-      args.push('--transcribe-only');
-    }
-
-    if (onProgress) {
-      args.push('--progress');
-    }
-
-    this.appendOptionalArg(args, '--batch-size', this.getBatchSize(isPreviewRequest));
-    this.appendOptionalArg(args, '--threads', this.getThreadCount(isPreviewRequest));
-    this.appendOptionalArg(args, '--min-speakers', request.minSpeakers?.toString());
-    this.appendOptionalArg(args, '--max-speakers', request.maxSpeakers?.toString());
+    this.appendOptionalArg(args, '--threads', this.getPersistentThreadCount());
+    this.appendOptionalArg(args, '--no-speech-threshold', process.env.MEETING_RECORDER_STT_NO_SPEECH_THRESHOLD);
+    this.appendOptionalArg(args, '--log-prob-threshold', process.env.MEETING_RECORDER_STT_LOG_PROB_THRESHOLD);
+    this.appendOptionalArg(
+      args,
+      '--hallucination-silence-threshold',
+      process.env.MEETING_RECORDER_STT_HALLUCINATION_SILENCE_THRESHOLD
+    );
+    this.appendOptionalArg(args, '--vad-onset', process.env.MEETING_RECORDER_STT_VAD_ONSET);
+    this.appendOptionalArg(args, '--vad-offset', process.env.MEETING_RECORDER_STT_VAD_OFFSET);
 
     if (process.env.MEETING_RECORDER_STT_ALLOW_DOWNLOAD !== '1') {
       args.push('--offline-only');
     }
 
-    try {
-      const workerEnv = await this.createWorkerEnvironment();
-      const stdout = await this.executeWorker(pythonPath, args, workerEnv, timeout, request, onProgress);
-      const result = this.parseWorkerOutput(stdout);
-      this.emitProgress(request, onProgress, 'done', 100, '전사 완료');
-      return result;
-    } catch (error) {
-      throw new Error(this.formatWorkerError(error));
-    }
-  }
-
-  // Python worker stdout을 줄 단위로 읽어 진행률 이벤트와 최종 JSON을 동시에 수집한다.
-  private executeWorker(
-    pythonPath: string,
-    args: string[],
-    env: NodeJS.ProcessEnv,
-    timeout: number,
-    request: OfflineTranscriptionRequest,
-    onProgress?: ProgressCallback
-  ): Promise<string> {
-    return new Promise((resolve, reject) => {
-      const child = spawn(pythonPath, args, { env });
-      const stdoutLines: string[] = [];
-      const stderrChunks: string[] = [];
-      let stdoutBuffer = '';
-      let latestProgress: TranscriptionProgressEvent | null = null;
-      let isSettled = false;
-      let timeoutId: NodeJS.Timeout;
-      let heartbeatId: NodeJS.Timeout;
-
-      const rejectWithError = (message: string) => {
-        if (isSettled) {
-          return;
-        }
-
-        isSettled = true;
-        clearTimeout(timeoutId);
-        clearInterval(heartbeatId);
-        reject({ message, stderr: stderrChunks.join('') });
-      };
-
-      const resolveWithOutput = () => {
-        if (isSettled) {
-          return;
-        }
-
-        isSettled = true;
-        clearTimeout(timeoutId);
-        clearInterval(heartbeatId);
-        resolve(stdoutLines.join('\n'));
-      };
-
-      timeoutId = setTimeout(() => {
-        child.kill();
-        rejectWithError(`전사 엔진 실행 시간이 초과되었습니다. (${Math.round(timeout / 1000)}초)`);
-      }, timeout);
-
-      heartbeatId = setInterval(() => {
-        if (!latestProgress) {
-          return;
-        }
-
-        const nextProgress = Math.min(
-          this.getStageProgressCap(latestProgress.stage),
-          latestProgress.progress + 1
-        );
-
-        if (nextProgress > latestProgress.progress) {
-          latestProgress = { ...latestProgress, progress: nextProgress };
-          onProgress?.(latestProgress);
-        }
-      }, 1000);
-
-      const handleStdoutLine = (line: string) => {
-        stdoutLines.push(line);
-        const progress = this.parseProgressOutput(line, request);
-
-        if (progress) {
-          latestProgress = progress;
-          onProgress?.(progress);
-        }
-      };
-
-      child.stdout.on('data', (chunk: Buffer) => {
-        stdoutBuffer += chunk.toString('utf-8');
-        const lines = stdoutBuffer.split(/\r?\n/);
-        stdoutBuffer = lines.pop() ?? '';
-        lines.map((line) => line.trim()).filter(Boolean).forEach(handleStdoutLine);
-      });
-
-      child.stderr.on('data', (chunk: Buffer) => {
-        stderrChunks.push(chunk.toString('utf-8'));
-      });
-
-      child.on('error', (error) => rejectWithError(error.message));
-      child.on('close', (code) => {
-        if (stdoutBuffer.trim()) {
-          handleStdoutLine(stdoutBuffer.trim());
-        }
-
-        if (code === 0) {
-          resolveWithOutput();
-          return;
-        }
-
-        rejectWithError(`전사 엔진이 종료 코드 ${code ?? 'unknown'}로 실패했습니다.`);
-      });
-    });
+    return args;
   }
 
   // MIME 타입에 따라 ffmpeg/torchcodec이 이해하기 쉬운 임시 파일 확장자를 고른다.
@@ -236,19 +149,19 @@ export class LocalTranscriptionService {
   }
 
   // 개발 중에는 repo worker, 패키징 후에는 resources worker를 실행한다.
-  private getWorkerPath(): string {
-    if (process.env.MEETING_RECORDER_STT_WORKER) {
-      return process.env.MEETING_RECORDER_STT_WORKER;
+  private getPersistentWorkerPath(): string {
+    if (process.env.MEETING_RECORDER_STT_PERSISTENT_WORKER) {
+      return process.env.MEETING_RECORDER_STT_PERSISTENT_WORKER;
     }
 
     if (app.isPackaged) {
-      return path.join(process.resourcesPath, 'engines/offline-whisperx/worker.py');
+      return path.join(process.resourcesPath, 'engines/offline-whisperx/persistent_worker.py');
     }
 
-    return path.join(this.appRoot, 'engines/offline-whisperx/worker.py');
+    return path.join(this.appRoot, 'engines/offline-whisperx/persistent_worker.py');
   }
 
-  // macOS의 keg-only ffmpeg@7과 Python 라이브러리 캐시 경로를 worker 환경에 주입한다.
+  // Python 라이브러리 캐시와 앱에 포함된 ffmpeg 경로를 worker 환경에 주입한다.
   private async createWorkerEnvironment(): Promise<NodeJS.ProcessEnv> {
     const cacheDirectory = path.join(tmpdir(), 'meeting-recorder-worker-cache');
     const ffmpegDirectory = this.getFfmpegDirectory();
@@ -316,156 +229,17 @@ export class LocalTranscriptionService {
     }
   }
 
-  // 미리보기 요청을 제외한 최종 전사 진행률만 렌더러로 전달한다.
-  private emitProgress(
-    request: OfflineTranscriptionRequest,
-    onProgress: ProgressCallback | undefined,
-    stage: TranscriptionProgressStage,
-    progress: number,
-    message: string
-  ): void {
-    if (!onProgress) {
-      return;
-    }
-
-    onProgress({
-      sessionId: request.sessionId,
-      mode: request.mode ?? 'final',
-      stage,
-      progress: Math.max(0, Math.min(100, progress)),
-      message
-    });
-  }
-
-  // worker가 출력한 progress JSON이면 앱 진행률 이벤트로 변환한다.
-  private parseProgressOutput(
-    line: string,
-    request: OfflineTranscriptionRequest
-  ): TranscriptionProgressEvent | null {
-    if (!line.startsWith('{') || !line.endsWith('}')) {
-      return null;
-    }
-
-    try {
-      const parsed = JSON.parse(line) as Partial<TranscriptionProgressEvent> & { type?: string };
-
-      if (parsed.type !== 'progress' || typeof parsed.progress !== 'number' || !parsed.stage) {
-        return null;
-      }
-
-      return {
-        sessionId: request.sessionId,
-        mode: request.mode ?? 'final',
-        stage: parsed.stage,
-        progress: Math.max(0, Math.min(100, Math.round(parsed.progress))),
-        message: typeof parsed.message === 'string' ? parsed.message : '전사 진행 중'
-      };
-    } catch {
-      return null;
-    }
-  }
-
-  // 오래 걸리는 단계에서 보정 진행률이 지나치게 앞서가지 않도록 단계별 상한을 둔다.
-  private getStageProgressCap(stage: TranscriptionProgressStage): number {
-    const caps: Record<TranscriptionProgressStage, number> = {
-      prepare: 8,
-      model: 18,
-      audio: 24,
-      transcribe: 58,
-      align: 70,
-      diarize: 92,
-      save: 98,
-      done: 100
-    };
-
-    return caps[stage];
-  }
-
-  // 미리보기 전사는 녹음 안정성을 위해 작은 배치로 돌리고, 최종 전사는 기본값을 유지한다.
+  // 미리보기 전사는 작은 배치로 돌리고, 최종 전사는 WhisperX 기본 배치를 사용한다.
   private getBatchSize(isPreviewRequest: boolean): string | undefined {
     if (isPreviewRequest) {
-      return (
-        process.env.MEETING_RECORDER_STT_PREVIEW_BATCH_SIZE ??
-        process.env.MEETING_RECORDER_STT_BATCH_SIZE ??
-        DEFAULT_PREVIEW_BATCH_SIZE
-      );
+      return process.env.MEETING_RECORDER_STT_PREVIEW_BATCH_SIZE ?? DEFAULT_PREVIEW_BATCH_SIZE;
     }
 
     return process.env.MEETING_RECORDER_STT_BATCH_SIZE;
   }
 
-  // 백그라운드 미리보기 작업이 CPU를 과점하지 않도록 추론 스레드 수를 낮춘다.
-  private getThreadCount(isPreviewRequest: boolean): string | undefined {
-    if (isPreviewRequest) {
-      return (
-        process.env.MEETING_RECORDER_STT_PREVIEW_THREADS ??
-        process.env.MEETING_RECORDER_STT_THREADS ??
-        DEFAULT_PREVIEW_THREAD_COUNT
-      );
-    }
-
-    return process.env.MEETING_RECORDER_STT_THREADS;
-  }
-
-  // 외부 STT 라이브러리 로그가 stdout에 섞여도 마지막 JSON 결과만 안정적으로 파싱한다.
-  private parseWorkerOutput(stdout: string): OfflineTranscriptionResult {
-    const lines = stdout
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-
-    for (const line of [...lines].reverse()) {
-      if (!line.startsWith('{') || !line.endsWith('}')) {
-        continue;
-      }
-
-      try {
-        const parsed = JSON.parse(line) as unknown;
-
-        if (this.isTranscriptionResult(parsed)) {
-          return parsed;
-        }
-      } catch {
-        // JSON처럼 보이지만 결과 객체가 아닌 로그 라인은 건너뛴다.
-      }
-    }
-
-    const outputTail = lines.slice(-8).join('\n');
-    throw new Error(`전사 엔진 결과 JSON을 찾을 수 없습니다.\n${outputTail}`);
-  }
-
-  // worker 결과가 앱에서 필요한 최소 필드를 갖춘 전사 결과인지 확인한다.
-  private isTranscriptionResult(value: unknown): value is OfflineTranscriptionResult {
-    if (!value || typeof value !== 'object') {
-      return false;
-    }
-
-    const candidate = value as Partial<OfflineTranscriptionResult>;
-    return (
-      typeof candidate.engineName === 'string' &&
-      Array.isArray(candidate.speakers) &&
-      Array.isArray(candidate.segments)
-    );
-  }
-
-  // worker 실패 원인을 UI에 표시할 수 있는 짧은 문장으로 정리한다.
-  private formatWorkerError(error: unknown): string {
-    if (typeof error === 'object' && error && 'stderr' in error) {
-      const stderr = String((error as { stderr?: string }).stderr ?? '').trim();
-
-      if (stderr) {
-        return stderr.split('\n').slice(-8).join('\n');
-      }
-    }
-
-    if (typeof error === 'object' && error && 'message' in error) {
-      return String((error as { message?: string }).message ?? '오프라인 전사 엔진 실행에 실패했습니다.');
-    }
-
-    if (error instanceof Error) {
-      return error.message;
-    }
-
-    return '오프라인 전사 엔진 실행에 실패했습니다.';
+  // 녹음 중 미리보기 부하를 고려해 상주 모델의 CPU 스레드 수를 보수적으로 둔다.
+  private getPersistentThreadCount(): string | undefined {
+    return process.env.MEETING_RECORDER_STT_THREADS ?? DEFAULT_PERSISTENT_THREAD_COUNT;
   }
 }

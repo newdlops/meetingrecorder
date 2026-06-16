@@ -9,6 +9,7 @@ from typing import Any
 
 
 SPEAKER_COLORS = ["#1f7a8c", "#b45f06", "#4f6f52", "#6d597a", "#607d8b", "#8a5a44"]
+_DIARIZER_CACHE: dict[tuple[str, str, int, float], Any] = {}
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,14 @@ def diarize_audio(audio: Any, args: argparse.Namespace) -> list[DiarizedTurn]:
         ) from error
 
     segmentation_model, embedding_model = resolve_diarization_model_paths(args)
+    num_clusters = resolve_num_clusters(args)
+    cache_key = (str(segmentation_model), str(embedding_model), num_clusters, float(args.cluster_threshold))
+    diarizer = _DIARIZER_CACHE.get(cache_key)
+
+    if diarizer:
+        result = diarizer.process(audio).sort_by_start_time()
+        return build_turns(result)
+
     config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
             pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(
@@ -49,7 +58,7 @@ def diarize_audio(audio: Any, args: argparse.Namespace) -> list[DiarizedTurn]:
         ),
         embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=str(embedding_model)),
         clustering=sherpa_onnx.FastClusteringConfig(
-            num_clusters=resolve_num_clusters(args),
+            num_clusters=num_clusters,
             threshold=args.cluster_threshold,
         ),
         min_duration_on=0.3,
@@ -60,7 +69,14 @@ def diarize_audio(audio: Any, args: argparse.Namespace) -> list[DiarizedTurn]:
         raise RuntimeError("앱에 포함된 화자분리 모델 파일을 확인할 수 없습니다.")
 
     diarizer = sherpa_onnx.OfflineSpeakerDiarization(config)
+    _DIARIZER_CACHE[cache_key] = diarizer
     result = diarizer.process(audio).sort_by_start_time()
+    return build_turns(result)
+
+
+def build_turns(result: Any) -> list[DiarizedTurn]:
+    """sherpa-onnx 결과를 앱 내부 화자 구간 목록으로 변환한다."""
+
     return [
         DiarizedTurn(
             start=float(segment.start),
