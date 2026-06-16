@@ -1,4 +1,4 @@
-import { Loader2, Mic, Square } from 'lucide-react';
+import { Loader2, Mic, SlidersHorizontal, Square, Waves } from 'lucide-react';
 import type { RecordingStatus } from '../../../shared/types';
 import { formatDuration } from '../utils/time';
 
@@ -6,8 +6,13 @@ interface RecorderPanelProps {
   status: RecordingStatus;
   elapsedMs: number;
   error: string | null;
+  sensitivity: number;
+  inputLevel: number;
+  captureDistantSpeech: boolean;
   isLivePreviewing?: boolean;
   progressPercent?: number;
+  onSensitivityChange(value: number): void;
+  onCaptureDistantSpeechChange(value: boolean): void;
   onStart(): void;
   onStop(): void;
 }
@@ -17,8 +22,13 @@ export function RecorderPanel({
   status,
   elapsedMs,
   error,
+  sensitivity,
+  inputLevel,
+  captureDistantSpeech,
   isLivePreviewing = false,
   progressPercent,
+  onSensitivityChange,
+  onCaptureDistantSpeechChange,
   onStart,
   onStop
 }: RecorderPanelProps): JSX.Element {
@@ -54,6 +64,36 @@ export function RecorderPanel({
           {isSaving ? <Loader2 className="spin" size={18} /> : <Square size={18} />}
           녹음 종료
         </button>
+      </div>
+
+      <div className="recorderControls">
+        <label className="sensitivityControl">
+          <span>
+            <SlidersHorizontal size={15} />
+            감도 {sensitivity.toFixed(1)}x
+          </span>
+          <input
+            max="4"
+            min="0.5"
+            step="0.1"
+            type="range"
+            value={sensitivity}
+            onChange={(event) => onSensitivityChange(Number(event.target.value))}
+          />
+        </label>
+        <label className="distantSpeechToggle">
+          <input
+            checked={captureDistantSpeech}
+            disabled={isRecording}
+            type="checkbox"
+            onChange={(event) => onCaptureDistantSpeechChange(event.target.checked)}
+          />
+          <Waves size={15} />
+          주변음
+        </label>
+        <div className="inputLevelMeter" aria-label="입력 레벨">
+          <span style={{ width: `${inputLevel}%` }} />
+        </div>
       </div>
 
       {error ? <p className="errorText">{error}</p> : null}

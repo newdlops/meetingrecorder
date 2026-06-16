@@ -58,6 +58,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--threads", type=int, help="CPU 추론 스레드 수")
     parser.add_argument("--transcribe-only", action="store_true", help="화자분리 없이 전사 결과만 반환")
     parser.add_argument("--progress", action="store_true", help="stdout에 진행률 JSON 이벤트를 출력")
+    parser.add_argument("--no-speech-threshold", type=float, default=0.5, help="무음으로 판단할 no-speech 확률 기준")
+    parser.add_argument("--log-prob-threshold", type=float, default=-0.9, help="낮은 신뢰도 전사를 버릴 로그 확률 기준")
+    parser.add_argument("--hallucination-silence-threshold", type=float, default=1.0, help="무음 주변 환각 전사 제거 기준")
+    parser.add_argument("--vad-onset", type=float, default=0.35, help="VAD 발화 시작 민감도")
+    parser.add_argument("--vad-offset", type=float, default=0.25, help="VAD 발화 종료 민감도")
     parser.add_argument("--enable-align", action="store_true", help="외부 alignment 모델을 사용해 단어 타임스탬프를 보정")
     parser.add_argument("--offline-only", action="store_true", help="로컬 캐시 모델만 사용")
     return parser.parse_args()
@@ -129,6 +134,26 @@ def call_with_supported_kwargs(function: Any, *args: Any, **kwargs: Any) -> Any:
     return function(*args, **supported_kwargs)
 
 
+def build_asr_options(args: argparse.Namespace) -> dict[str, Any]:
+    """무음이나 잡음을 문장으로 착각하지 않도록 ASR 디코딩 기준을 조정한다."""
+
+    return {
+        "condition_on_previous_text": False,
+        "no_speech_threshold": args.no_speech_threshold,
+        "log_prob_threshold": args.log_prob_threshold,
+        "hallucination_silence_threshold": args.hallucination_silence_threshold,
+    }
+
+
+def build_vad_options(args: argparse.Namespace) -> dict[str, Any]:
+    """멀리 있는 발화도 잡되 무음 구간은 잘라낼 수 있도록 VAD 기준을 설정한다."""
+
+    return {
+        "vad_onset": args.vad_onset,
+        "vad_offset": args.vad_offset,
+    }
+
+
 def transcribe_audio(whisperx: Any, args: argparse.Namespace) -> dict[str, Any]:
     """WhisperX로 음성을 텍스트와 단어 타임스탬프로 변환한다."""
 
@@ -142,6 +167,8 @@ def transcribe_audio(whisperx: Any, args: argparse.Namespace) -> dict[str, Any]:
         download_root=args.model_dir,
         local_files_only=args.offline_only,
         threads=args.threads,
+        asr_options=build_asr_options(args),
+        vad_options=build_vad_options(args),
     )
     emit_progress(args, "audio", 20, "오디오를 분석하는 중")
     audio = whisperx.load_audio(args.audio)

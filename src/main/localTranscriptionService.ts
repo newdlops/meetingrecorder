@@ -74,7 +74,9 @@ export class LocalTranscriptionService {
 
     if (isPreviewRequest) {
       args.push('--transcribe-only');
-    } else {
+    }
+
+    if (onProgress) {
       args.push('--progress');
     }
 
@@ -322,7 +324,7 @@ export class LocalTranscriptionService {
     progress: number,
     message: string
   ): void {
-    if (!onProgress || request.mode === 'preview') {
+    if (!onProgress) {
       return;
     }
 
@@ -340,7 +342,7 @@ export class LocalTranscriptionService {
     line: string,
     request: OfflineTranscriptionRequest
   ): TranscriptionProgressEvent | null {
-    if (request.mode === 'preview' || !line.startsWith('{') || !line.endsWith('}')) {
+    if (!line.startsWith('{') || !line.endsWith('}')) {
       return null;
     }
 

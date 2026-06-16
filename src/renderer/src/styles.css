@@ -202,6 +202,56 @@ textarea:disabled {
   gap: 10px;
 }
 
+.recorderControls {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: minmax(180px, 1fr) auto minmax(120px, 180px);
+  gap: 14px;
+  align-items: center;
+  padding-top: 4px;
+}
+
+.sensitivityControl {
+  display: grid;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-width: 0;
+}
+
+.sensitivityControl span,
+.distantSpeechToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #526265;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.sensitivityControl input {
+  width: 100%;
+}
+
+.distantSpeechToggle input {
+  width: 16px;
+  height: 16px;
+}
+
+.inputLevelMeter {
+  height: 8px;
+  overflow: hidden;
+  background: #d9e2e4;
+  border-radius: 999px;
+}
+
+.inputLevelMeter span {
+  display: block;
+  height: 100%;
+  background: #4f6f52;
+  transition: width 90ms linear;
+}
+
 .primaryButton,
 .dangerButton,
 .ghostButton {
@@ -306,6 +356,26 @@ textarea:disabled {
   padding-right: 4px;
 }
 
+.livePreviewStatus {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+  padding: 10px 12px;
+  color: #526265;
+  font-size: 13px;
+  background: #f7faf9;
+  border: 1px solid #dfe7e9;
+  border-radius: 8px;
+}
+
+.livePreviewStatus strong {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .transcriptSegment {
   padding: 14px 14px 14px 16px;
   border-left: 4px solid var(--speaker-color);
@@ -404,7 +474,8 @@ textarea:disabled {
   }
 
   .contentGrid,
-  .recorderPanel {
+  .recorderPanel,
+  .recorderControls {
     grid-template-columns: 1fr;
   }
 

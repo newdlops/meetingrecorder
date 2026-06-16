@@ -12,7 +12,7 @@ import { SessionList } from './components/SessionList';
 import { SessionManagementPanel } from './components/SessionManagementPanel';
 import { SpeakerEditor } from './components/SpeakerEditor';
 import { TranscriptPanel } from './components/TranscriptPanel';
-import { useRecorder } from './hooks/useRecorder';
+import { type RecorderSettings, useRecorder } from './hooks/useRecorder';
 import { createDraftMeetingSession } from './services/meetingFactory';
 import { transcribeRecordedAudio } from './services/offlineTranscription';
 
@@ -26,10 +26,12 @@ export function App(): JSX.Element {
   const {
     status: recordingStatus,
     elapsedMs,
+    inputLevel,
     error: recorderError,
     startRecording,
     stopRecording,
-    createRecordingSnapshot
+    createRecordingSnapshot,
+    updateSensitivity
   } = useRecorder();
   const draftSessionRef = useRef<MeetingSession | null>(null);
   const recordingStatusRef = useRef<RecordingStatus>(recordingStatus);
@@ -42,6 +44,11 @@ export function App(): JSX.Element {
   const [draftSession, setDraftSession] = useState<MeetingSession | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isLivePreviewing, setIsLivePreviewing] = useState(false);
+  const [recorderSettings, setRecorderSettings] = useState<RecorderSettings>({
+    sensitivity: 1.8,
+    captureDistantSpeech: true
+  });
+  const [livePreviewProgress, setLivePreviewProgress] = useState<TranscriptionProgressEvent | null>(null);
   const [finalTranscriptionProgress, setFinalTranscriptionProgress] =
     useState<TranscriptionProgressEvent | null>(null);
   const [appError, setAppError] = useState<string | null>(null);
@@ -61,7 +68,12 @@ export function App(): JSX.Element {
     return window.meetingRecorder.onTranscriptionProgress((progress) => {
       const currentDraft = draftSessionRef.current;
 
-      if (progress.mode !== 'final' || !currentDraft || currentDraft.id !== progress.sessionId) {
+      if (!currentDraft || currentDraft.id !== progress.sessionId) {
+        return;
+      }
+
+      if (progress.mode === 'preview') {
+        setLivePreviewProgress(progress);
         return;
       }
 
@@ -87,10 +99,11 @@ export function App(): JSX.Element {
       }
 
       const snapshot = await createRecordingSnapshot();
+      const snapshotEndMs = snapshot ? (snapshot.startOffsetMs ?? 0) + snapshot.durationMs : 0;
       const hasEnoughAudio =
         snapshot &&
-        snapshot.durationMs >= LIVE_PREVIEW_INITIAL_DELAY_MS &&
-        snapshot.durationMs - livePreviewLastDurationRef.current >= LIVE_PREVIEW_MIN_NEW_AUDIO_MS;
+        snapshotEndMs >= LIVE_PREVIEW_INITIAL_DELAY_MS &&
+        snapshotEndMs - livePreviewLastDurationRef.current >= LIVE_PREVIEW_MIN_NEW_AUDIO_MS;
 
       if (
         !snapshot ||
@@ -103,7 +116,7 @@ export function App(): JSX.Element {
 
       livePreviewInFlightRef.current = true;
       livePreviewActiveRunRef.current = runId;
-      livePreviewLastDurationRef.current = snapshot.durationMs;
+      livePreviewLastDurationRef.current = snapshotEndMs;
       setIsLivePreviewing(true);
 
       try {
@@ -127,11 +140,27 @@ export function App(): JSX.Element {
           }
 
           const hasPreviewSegments = previewResult.segments.length > 0;
+          const previewStartMs = snapshot.startOffsetMs ?? 0;
+          const previewEndMs = previewStartMs + snapshot.durationMs;
+          const shiftedSegments = previewResult.segments.map((segment) => ({
+            ...segment,
+            id: `preview-${previewStartMs}-${segment.id}`,
+            startMs: previewStartMs + segment.startMs,
+            endMs: previewStartMs + segment.endMs
+          }));
+          const nextSegments = hasPreviewSegments
+            ? [
+                ...currentSession.segments.filter(
+                  (segment) => segment.endMs <= previewStartMs || segment.startMs >= previewEndMs
+                ),
+                ...shiftedSegments
+              ].sort((a, b) => a.startMs - b.startMs)
+            : currentSession.segments;
           const nextSession: MeetingSession = {
             ...currentSession,
-            durationMs: snapshot.durationMs,
+            durationMs: Math.max(currentSession.durationMs, snapshotEndMs),
             speakers: hasPreviewSegments ? previewResult.speakers : currentSession.speakers,
-            segments: hasPreviewSegments ? previewResult.segments : currentSession.segments,
+            segments: nextSegments,
             updatedAt: new Date().toISOString()
           };
 
@@ -146,6 +175,7 @@ export function App(): JSX.Element {
         if (livePreviewActiveRunRef.current === runId) {
           livePreviewActiveRunRef.current = null;
           setIsLivePreviewing(false);
+          setLivePreviewProgress(null);
         }
       }
     },
@@ -195,13 +225,28 @@ export function App(): JSX.Element {
     [recordingStatus]
   );
 
+  // 감도 슬라이더 값을 저장하고 녹음 중이면 Web Audio gain에 즉시 반영한다.
+  const handleSensitivityChange = useCallback(
+    (sensitivity: number) => {
+      setRecorderSettings((currentSettings) => ({ ...currentSettings, sensitivity }));
+      updateSensitivity(sensitivity);
+    },
+    [updateSensitivity]
+  );
+
+  // 주변음 모드는 멀리 있는 발화가 잘리지 않도록 다음 녹음의 마이크 처리 방식을 바꾼다.
+  const handleCaptureDistantSpeechChange = useCallback((captureDistantSpeech: boolean) => {
+    setRecorderSettings((currentSettings) => ({ ...currentSettings, captureDistantSpeech }));
+  }, []);
+
   // 마이크 녹음을 시작하고 오프라인 전사용 회의 초안을 만든다.
   const handleStartRecording = useCallback(async () => {
     setAppError(null);
+    setLivePreviewProgress(null);
     setFinalTranscriptionProgress(null);
 
     try {
-      await startRecording();
+      await startRecording(recorderSettings);
 
       const nextSession = createDraftMeetingSession();
       setSelectedSession(null);
@@ -209,7 +254,7 @@ export function App(): JSX.Element {
     } catch (error) {
       setAppError(error instanceof Error ? error.message : '녹음을 시작할 수 없습니다.');
     }
-  }, [startRecording]);
+  }, [recorderSettings, startRecording]);
 
   // 녹음을 종료한 뒤 로컬 오프라인 엔진으로 전사하고 파일 저장소에 저장한다.
   const handleStopRecording = useCallback(async () => {
@@ -219,6 +264,7 @@ export function App(): JSX.Element {
 
     setIsSaving(true);
     setAppError(null);
+    setLivePreviewProgress(null);
     setFinalTranscriptionProgress(null);
 
     try {
@@ -409,17 +455,25 @@ export function App(): JSX.Element {
 
       <main className="workspace">
         <RecorderPanel
+          captureDistantSpeech={recorderSettings.captureDistantSpeech}
           elapsedMs={elapsedMs}
           error={appError ?? recorderError}
+          inputLevel={inputLevel}
           progressPercent={finalTranscriptionProgress?.progress}
           isLivePreviewing={isLivePreviewing}
+          sensitivity={recorderSettings.sensitivity}
           status={visibleStatus}
+          onCaptureDistantSpeechChange={handleCaptureDistantSpeechChange}
+          onSensitivityChange={handleSensitivityChange}
           onStart={handleStartRecording}
           onStop={handleStopRecording}
         />
 
         <section className="contentGrid">
           <TranscriptPanel
+            isLivePreviewing={isLivePreviewing}
+            isRecording={recordingStatus === 'recording'}
+            previewProgress={livePreviewProgress}
             session={activeSession}
             onExport={selectedSession && !draftSession ? handleExportTranscript : undefined}
           />

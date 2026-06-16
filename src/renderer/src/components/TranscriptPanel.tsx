@@ -1,16 +1,26 @@
-import { Download, MessageSquareText } from 'lucide-react';
+import { Download, Loader2, MessageSquareText } from 'lucide-react';
 import type { CSSProperties } from 'react';
-import type { MeetingSession } from '../../../shared/types';
+import type { MeetingSession, TranscriptionProgressEvent } from '../../../shared/types';
 import { formatDuration } from '../utils/time';
 
 interface TranscriptPanelProps {
   session: MeetingSession | null;
+  isRecording?: boolean;
+  isLivePreviewing?: boolean;
+  previewProgress?: TranscriptionProgressEvent | null;
   onExport?: () => void;
 }
 
 // 전사 구간을 시간순으로 표시하고 텍스트 내보내기를 제공한다.
-export function TranscriptPanel({ session, onExport }: TranscriptPanelProps): JSX.Element {
+export function TranscriptPanel({
+  session,
+  isRecording = false,
+  isLivePreviewing = false,
+  previewProgress,
+  onExport
+}: TranscriptPanelProps): JSX.Element {
   const speakerMap = new Map(session?.speakers.map((speaker) => [speaker.id, speaker]) ?? []);
+  const previewMessage = previewProgress?.message ?? (isLivePreviewing ? '전사 미리보기 생성 중' : '음성 감지 대기');
 
   return (
     <section className="transcriptPanel">
@@ -26,6 +36,14 @@ export function TranscriptPanel({ session, onExport }: TranscriptPanelProps): JS
           </button>
         ) : null}
       </div>
+
+      {isRecording ? (
+        <div className="livePreviewStatus">
+          {isLivePreviewing ? <Loader2 className="spin" size={16} /> : <MessageSquareText size={16} />}
+          <strong>{previewMessage}</strong>
+          {previewProgress ? <span>{Math.round(previewProgress.progress)}%</span> : null}
+        </div>
+      ) : null}
 
       {!session || session.segments.length === 0 ? (
         <p className="emptyText">전사 구간이 없습니다.</p>
