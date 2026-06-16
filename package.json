@@ -7,10 +7,16 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "tsc --noEmit && electron-vite build",
+    "dist": "npm run build && electron-builder",
+    "dist:dir": "npm run build && electron-builder --dir",
     "preview": "electron-vite preview",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "setup:stt": "python3 -m venv .venv-stt && .venv-stt/bin/python -m pip install --upgrade pip && .venv-stt/bin/python -m pip install -r engines/offline-whisperx/requirements.txt",
+    "setup:engine-assets": ".venv-stt/bin/python scripts/setup-engine-assets.py",
+    "setup:standalone": "npm run setup:stt && npm run setup:engine-assets"
   },
   "dependencies": {
+    "ffmpeg-static": "^5.3.0",
     "lucide-react": "^1.18.0",
     "react": "^19.2.7",
     "react-dom": "^19.2.7"
@@ -21,11 +27,41 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^5.2.0",
     "electron": "^42.4.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^5.0.0",
     "typescript": "^6.0.3",
     "vite": "^7.3.5"
   },
   "overrides": {
     "esbuild": "^0.28.1"
+  },
+  "build": {
+    "appId": "com.meetingrecorder.app",
+    "productName": "Meeting Recorder",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "engines/offline-whisperx",
+        "to": "engines/offline-whisperx"
+      },
+      {
+        "from": "engines/models",
+        "to": "engines/models"
+      },
+      {
+        "from": ".venv-stt",
+        "to": ".venv-stt"
+      }
+    ],
+    "mac": {
+      "target": ["dmg", "zip"],
+      "category": "public.app-category.productivity"
+    }
   }
 }

@@ -10,6 +10,7 @@ release/
 .zoek-rs/
 __pycache__/
 .venv-stt/
+engines/models/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*

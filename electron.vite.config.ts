@@ -1,5 +1,6 @@
 import { defineConfig, externalizeDepsPlugin } from 'electron-vite';
 import react from '@vitejs/plugin-react';
+import { resolve } from 'node:path';
 
 // Electron main/preload/renderer 번들 위치를 한곳에서 관리한다.
 export default defineConfig({
@@ -19,7 +20,7 @@ export default defineConfig({
     root: 'src/renderer',
     plugins: [react()],
     build: {
-      outDir: '../../dist/renderer'
+      outDir: resolve(__dirname, 'dist/renderer')
     }
   }
 });

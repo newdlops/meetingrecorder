@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""WhisperX와 pyannote.audio를 이용해 로컬 전사/화자분리를 수행한다."""
+"""WhisperX와 sherpa-onnx를 이용해 로컬 전사/화자분리를 수행한다."""
 
 from __future__ import annotations
 
@@ -9,31 +9,24 @@ import json
 import os
 import sys
 import traceback
-from dataclasses import dataclass
+import warnings
 from typing import Any
 
+from diarization import (
+    DiarizedTurn,
+    build_speakers,
+    diarize_audio,
+    find_overlap_regions,
+    get_overlap_group,
+    get_speaker_label,
+)
 
-SPEAKER_COLORS = ["#1f7a8c", "#b45f06", "#4f6f52", "#6d597a", "#607d8b", "#8a5a44"]
 DEFAULT_LANGUAGE = "ko"
 DEFAULT_TASK = "transcribe"
+DEFAULT_CLUSTER_THRESHOLD = 0.5
 
-
-@dataclass(frozen=True)
-class DiarizedTurn:
-    """pyannote가 반환한 화자 발화 구간을 앱에서 쓰기 쉬운 형태로 보관한다."""
-
-    start: float
-    end: float
-    speaker_label: str
-
-
-@dataclass(frozen=True)
-class OverlapRegion:
-    """서로 다른 두 화자의 발화 시간이 겹친 구간을 표현한다."""
-
-    start: float
-    end: float
-    group_id: str
+warnings.filterwarnings("ignore", message=r"\s*torchcodec is not installed correctly.*")
+warnings.filterwarnings("ignore", category=UserWarning, module=r"pyannote\.audio\.core\.io")
 
 
 def parse_args() -> argparse.Namespace:
@@ -51,11 +44,16 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_TASK,
         help="전사는 transcribe, 영어 번역은 translate",
     )
-    parser.add_argument("--hf-token", help="pyannote 모델 접근용 Hugging Face token")
     parser.add_argument("--model-dir", help="모델 캐시 디렉터리")
+    parser.add_argument("--asset-root", help="앱에 포함된 엔진 모델 자산 루트")
+    parser.add_argument("--diarization-segmentation-model", help="sherpa-onnx 화자 segmentation ONNX 경로")
+    parser.add_argument("--diarization-embedding-model", help="sherpa-onnx speaker embedding ONNX 경로")
+    parser.add_argument("--num-speakers", type=int, default=-1, help="알고 있는 화자 수. 모르면 -1")
+    parser.add_argument("--cluster-threshold", type=float, default=DEFAULT_CLUSTER_THRESHOLD, help="화자 클러스터링 임계값")
     parser.add_argument("--min-speakers", type=int, help="예상 최소 화자 수")
     parser.add_argument("--max-speakers", type=int, help="예상 최대 화자 수")
     parser.add_argument("--batch-size", type=int, default=4, help="WhisperX 배치 크기")
+    parser.add_argument("--enable-align", action="store_true", help="외부 alignment 모델을 사용해 단어 타임스탬프를 보정")
     parser.add_argument("--offline-only", action="store_true", help="로컬 캐시 모델만 사용")
     return parser.parse_args()
 
@@ -64,13 +62,14 @@ def import_engine_modules() -> Any:
     """필수 Python 패키지를 불러오고 없으면 설치 안내가 가능한 오류를 낸다."""
 
     try:
-      import whisperx  # type: ignore
+        import whisperx  # type: ignore
     except ImportError as error:
         raise RuntimeError(
             "오프라인 전사 엔진 의존성이 없습니다. "
             "`pip install -r engines/offline-whisperx/requirements.txt`를 실행하세요."
         ) from error
 
+    whisperx.setup_logging("error")
     return whisperx
 
 
@@ -88,6 +87,15 @@ def call_with_supported_kwargs(function: Any, *args: Any, **kwargs: Any) -> Any:
     """설치된 WhisperX 버전에 존재하는 키워드 인자만 넘겨 호환성을 높인다."""
 
     signature = inspect.signature(function)
+    has_keyword_args = any(
+        parameter.kind == inspect.Parameter.VAR_KEYWORD
+        for parameter in signature.parameters.values()
+    )
+
+    if has_keyword_args:
+        supported_kwargs = {key: value for key, value in kwargs.items() if value is not None}
+        return function(*args, **supported_kwargs)
+
     supported_kwargs = {
         key: value
         for key, value in kwargs.items()
@@ -123,6 +131,9 @@ def transcribe_audio(whisperx: Any, args: argparse.Namespace) -> dict[str, Any]:
 def align_words(whisperx: Any, result: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
     """가능하면 언어별 alignment 모델로 단어 타임스탬프를 보정한다."""
 
+    if not args.enable_align:
+        return result
+
     language = result.get("language") or args.language
 
     if not language:
@@ -149,88 +160,6 @@ def align_words(whisperx: Any, result: dict[str, Any], args: argparse.Namespace)
     except Exception as error:
         print(f"단어 alignment를 건너뜁니다: {error}", file=sys.stderr)
         return result
-
-
-def diarize_audio(whisperx: Any, args: argparse.Namespace) -> Any:
-    """pyannote 기반 화자분리 파이프라인을 실행한다."""
-
-    from whisperx.diarize import DiarizationPipeline  # type: ignore
-
-    pipeline = DiarizationPipeline(token=args.hf_token, device=args.device)
-    diarize_kwargs = {
-        "min_speakers": args.min_speakers,
-        "max_speakers": args.max_speakers,
-    }
-    return call_with_supported_kwargs(pipeline, args.audio, **diarize_kwargs)
-
-
-def extract_diarized_turns(diarization: Any) -> list[DiarizedTurn]:
-    """pyannote Annotation 객체에서 시간/화자 라벨만 뽑아낸다."""
-
-    turns: list[DiarizedTurn] = []
-
-    for turn, _, speaker_label in diarization.itertracks(yield_label=True):
-        turns.append(
-            DiarizedTurn(
-                start=float(turn.start),
-                end=float(turn.end),
-                speaker_label=str(speaker_label),
-            )
-        )
-
-    return sorted(turns, key=lambda item: (item.start, item.end, item.speaker_label))
-
-
-def find_overlap_regions(turns: list[DiarizedTurn]) -> list[OverlapRegion]:
-    """서로 다른 화자 발화가 시간상 겹치는 구간 목록을 만든다."""
-
-    regions: list[OverlapRegion] = []
-
-    for left_index, left in enumerate(turns):
-        for right in turns[left_index + 1 :]:
-            if right.start >= left.end:
-                break
-
-            if left.speaker_label == right.speaker_label:
-                continue
-
-            start = max(left.start, right.start)
-            end = min(left.end, right.end)
-
-            if start < end:
-                regions.append(OverlapRegion(start=start, end=end, group_id=f"overlap-{len(regions) + 1}"))
-
-    return regions
-
-
-def build_speakers(turns: list[DiarizedTurn]) -> tuple[list[dict[str, str]], dict[str, str]]:
-    """pyannote 화자 라벨을 앱의 speakerId와 표시 이름으로 변환한다."""
-
-    labels = sorted({turn.speaker_label for turn in turns})
-
-    if not labels:
-        labels = ["SPEAKER_00"]
-
-    label_to_id = {label: f"speaker-{index + 1}" for index, label in enumerate(labels)}
-    speakers = [
-        {
-            "id": label_to_id[label],
-            "name": f"화자 {index + 1}",
-            "color": SPEAKER_COLORS[index % len(SPEAKER_COLORS)],
-        }
-        for index, label in enumerate(labels)
-    ]
-    return speakers, label_to_id
-
-
-def get_overlap_group(start: float, end: float, regions: list[OverlapRegion]) -> str | None:
-    """전사 구간이 겹침 발화 구간과 만나는지 확인하고 그룹 ID를 돌려준다."""
-
-    for region in regions:
-        if start < region.end and end > region.start:
-            return region.group_id
-
-    return None
 
 
 def score_from_words(words: list[dict[str, Any]]) -> float:
@@ -291,6 +220,7 @@ def append_segment(
 
 def build_segments(
     result: dict[str, Any],
+    turns: list[DiarizedTurn],
     label_to_id: dict[str, str],
     overlaps: list[OverlapRegion],
 ) -> list[dict[str, Any]]:
@@ -305,7 +235,7 @@ def build_segments(
         if not words:
             start = float(raw_segment.get("start", 0.0))
             end = float(raw_segment.get("end", start))
-            speaker_label = str(raw_segment.get("speaker") or "")
+            speaker_label = get_speaker_label(start, end, turns)
             speaker_id = label_to_id.get(speaker_label, fallback_speaker_id)
             overlap_group_id = get_overlap_group(start, end, overlaps)
             append_segment(
@@ -320,10 +250,14 @@ def build_segments(
             continue
 
         current_words: list[dict[str, Any]] = []
-        current_speaker_label = str(words[0].get("speaker") or raw_segment.get("speaker") or "")
+        first_start = float(words[0].get("start", raw_segment.get("start", 0.0)))
+        first_end = float(words[0].get("end", first_start))
+        current_speaker_label = get_speaker_label(first_start, first_end, turns)
 
         for word in words:
-            word_speaker_label = str(word.get("speaker") or raw_segment.get("speaker") or current_speaker_label)
+            word_start = float(word.get("start", raw_segment.get("start", 0.0)))
+            word_end = float(word.get("end", word_start))
+            word_speaker_label = get_speaker_label(word_start, word_end, turns)
 
             if current_words and word_speaker_label != current_speaker_label:
                 flush_word_group(segments, current_words, current_speaker_label, label_to_id, fallback_speaker_id, overlaps)
@@ -356,19 +290,17 @@ def flush_word_group(
     append_segment(segments, speaker_id, start, end, text, score_from_words(words), overlap_group_id)
 
 
-def build_output(whisperx: Any, result: dict[str, Any], diarization: Any) -> dict[str, Any]:
+def build_output(result: dict[str, Any], turns: list[DiarizedTurn]) -> dict[str, Any]:
     """전사 결과, 화자 목록, 겹침 발화 표시를 최종 JSON으로 조립한다."""
 
-    assigned = whisperx.assign_word_speakers(diarization, result)
-    turns = extract_diarized_turns(diarization)
     overlaps = find_overlap_regions(turns)
     speakers, label_to_id = build_speakers(turns)
-    segments = build_segments(assigned, label_to_id, overlaps)
+    segments = build_segments(result, turns, label_to_id, overlaps)
     duration_ms = max((segment["endMs"] for segment in segments), default=0)
 
     return {
-        "engineName": "whisperx-pyannote-local",
-        "language": assigned.get("language") or result.get("language"),
+        "engineName": "whisperx-sherpa-onnx-local",
+        "language": result.get("language"),
         "durationMs": duration_ms,
         "speakers": speakers,
         "segments": segments,
@@ -376,7 +308,7 @@ def build_output(whisperx: Any, result: dict[str, Any], diarization: Any) -> dic
 
 
 def main() -> int:
-    """worker 전체 실행 흐름을 조율하고 stdout에 JSON만 출력한다."""
+    """worker 전체 실행 흐름을 조율하고 마지막 stdout 라인에 JSON을 출력한다."""
 
     args = parse_args()
     configure_offline_mode(args.offline_only)
@@ -385,8 +317,8 @@ def main() -> int:
         whisperx = import_engine_modules()
         result = transcribe_audio(whisperx, args)
         result = align_words(whisperx, result, args)
-        diarization = diarize_audio(whisperx, args)
-        print(json.dumps(build_output(whisperx, result, diarization), ensure_ascii=False))
+        turns = diarize_audio(result["_audio"], args)
+        print(json.dumps(build_output(result, turns), ensure_ascii=False))
         return 0
     except Exception as error:
         print(str(error), file=sys.stderr)

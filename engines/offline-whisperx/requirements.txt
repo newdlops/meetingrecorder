@@ -1,2 +1,2 @@
 whisperx
-pyannote.audio
+sherpa-onnx>=1.10.28

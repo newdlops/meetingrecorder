@@ -19,18 +19,11 @@ npm run dev
 
 ## 오프라인 전사 엔진 준비
 
-```bash
-python3 -m venv .venv-stt
-source .venv-stt/bin/activate
-pip install -r engines/offline-whisperx/requirements.txt
-brew install ffmpeg
-```
-
-화자분리 모델은 최초 1회 Hugging Face 약관 승인과 token이 필요합니다.
+최종 사용자 앱은 Python 엔진, ffmpeg, STT 모델, 화자분리 모델을 포함해서 배포해야 합니다. 개발/릴리즈 준비 단계에서만 아래 명령을 실행합니다.
 
 ```bash
-export MEETING_RECORDER_STT_PYTHON=".venv-stt/bin/python"
-export MEETING_RECORDER_HF_TOKEN="hf_..."
+npm run setup:standalone
+npm run dist
 ```
 
-한국어 전사는 기본값입니다. 내부적으로 `MEETING_RECORDER_STT_LANGUAGE=ko`와 `MEETING_RECORDER_STT_TASK=transcribe`를 사용해 한글 받아쓰기를 우선합니다. 모델을 내려받은 뒤 네트워크 없이 실행하려면 `MEETING_RECORDER_STT_OFFLINE=1`을 추가합니다. 동시에 말하는 구간은 `TranscriptSegment.isOverlapped`와 `overlapGroupId`로 저장합니다.
+생성된 앱은 `release/` 아래에 만들어집니다. 한국어 전사는 기본값이며 내부적으로 `MEETING_RECORDER_STT_LANGUAGE=ko`와 `MEETING_RECORDER_STT_TASK=transcribe`를 사용합니다. 화자분리는 Hugging Face token이 필요 없는 `sherpa-onnx` 로컬 ONNX 모델을 사용합니다. 동시에 말하는 구간은 `TranscriptSegment.isOverlapped`와 `overlapGroupId`로 저장합니다.
