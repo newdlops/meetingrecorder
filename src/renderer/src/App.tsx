@@ -1,17 +1,25 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { MeetingSession, MeetingSessionSummary, RecordingStatus } from '../../shared/types';
+import type {
+  MeetingSession,
+  MeetingSessionSummary,
+  RecordingStatus,
+  SessionDetailsUpdateRequest,
+  TranscriptionProgressEvent
+} from '../../shared/types';
+import { buildTranscriptText } from '../../shared/transcriptFormatter';
 import { RecorderPanel } from './components/RecorderPanel';
 import { SessionList } from './components/SessionList';
+import { SessionManagementPanel } from './components/SessionManagementPanel';
 import { SpeakerEditor } from './components/SpeakerEditor';
 import { TranscriptPanel } from './components/TranscriptPanel';
 import { useRecorder } from './hooks/useRecorder';
 import { createDraftMeetingSession } from './services/meetingFactory';
 import { transcribeRecordedAudio } from './services/offlineTranscription';
 
-// 녹음 안정성을 우선하기 위해 미리보기 전사는 여유 있는 간격으로만 실행한다.
-const LIVE_PREVIEW_INITIAL_DELAY_MS = 20_000;
-const LIVE_PREVIEW_INTERVAL_MS = 30_000;
-const LIVE_PREVIEW_MIN_NEW_AUDIO_MS = 15_000;
+// 녹음 안정성을 지키기 위해 5초마다 한 번씩만 미리보기 전사를 요청한다.
+const LIVE_PREVIEW_INITIAL_DELAY_MS = 5_000;
+const LIVE_PREVIEW_INTERVAL_MS = 5_000;
+const LIVE_PREVIEW_MIN_NEW_AUDIO_MS = 5_000;
 
 // 전체 앱 상태를 조율하고 메인 프로세스 IPC API를 호출한다.
 export function App(): JSX.Element {
@@ -34,6 +42,8 @@ export function App(): JSX.Element {
   const [draftSession, setDraftSession] = useState<MeetingSession | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isLivePreviewing, setIsLivePreviewing] = useState(false);
+  const [finalTranscriptionProgress, setFinalTranscriptionProgress] =
+    useState<TranscriptionProgressEvent | null>(null);
   const [appError, setAppError] = useState<string | null>(null);
 
   const activeSession = draftSession ?? selectedSession;
@@ -46,6 +56,18 @@ export function App(): JSX.Element {
   useEffect(() => {
     recordingStatusRef.current = recordingStatus;
   }, [recordingStatus]);
+
+  useEffect(() => {
+    return window.meetingRecorder.onTranscriptionProgress((progress) => {
+      const currentDraft = draftSessionRef.current;
+
+      if (progress.mode !== 'final' || !currentDraft || currentDraft.id !== progress.sessionId) {
+        return;
+      }
+
+      setFinalTranscriptionProgress(progress);
+    });
+  }, []);
 
   // 저장된 회의 목록을 새로 읽는다.
   const refreshSessions = useCallback(async () => {
@@ -105,13 +127,17 @@ export function App(): JSX.Element {
           }
 
           const hasPreviewSegments = previewResult.segments.length > 0;
-
-          return {
+          const nextSession: MeetingSession = {
             ...currentSession,
             durationMs: snapshot.durationMs,
             speakers: hasPreviewSegments ? previewResult.speakers : currentSession.speakers,
             segments: hasPreviewSegments ? previewResult.segments : currentSession.segments,
             updatedAt: new Date().toISOString()
+          };
+
+          return {
+            ...nextSession,
+            transcriptText: hasPreviewSegments ? buildTranscriptText(nextSession) : currentSession.transcriptText
           };
         });
       } finally {
@@ -172,6 +198,7 @@ export function App(): JSX.Element {
   // 마이크 녹음을 시작하고 오프라인 전사용 회의 초안을 만든다.
   const handleStartRecording = useCallback(async () => {
     setAppError(null);
+    setFinalTranscriptionProgress(null);
 
     try {
       await startRecording();
@@ -192,6 +219,7 @@ export function App(): JSX.Element {
 
     setIsSaving(true);
     setAppError(null);
+    setFinalTranscriptionProgress(null);
 
     try {
       const recordedAudio = await stopRecording();
@@ -203,13 +231,18 @@ export function App(): JSX.Element {
 
       const transcriptionPayload = await transcribeRecordedAudio(latestDraft.id, recordedAudio);
       const transcriptionResult = transcriptionPayload.result;
-      const completedSession: MeetingSession = {
+      const resultSession: MeetingSession = {
         ...latestDraft,
         durationMs: transcriptionResult?.durationMs ?? recordedAudio?.durationMs ?? latestDraft.durationMs,
         audioMimeType: recordedAudio?.mimeType ?? latestDraft.audioMimeType,
         speakers: transcriptionResult?.speakers ?? latestDraft.speakers,
         segments: transcriptionResult?.segments ?? latestDraft.segments,
         updatedAt: new Date().toISOString()
+      };
+      const completedSession: MeetingSession = {
+        ...resultSession,
+        transcriptText: transcriptionResult ? buildTranscriptText(resultSession) : latestDraft.transcriptText,
+        memo: latestDraft.memo
       };
 
       const savedSession = await window.meetingRecorder.saveSession({
@@ -229,6 +262,7 @@ export function App(): JSX.Element {
       setAppError(error instanceof Error ? error.message : '회의 저장에 실패했습니다.');
     } finally {
       setIsSaving(false);
+      setFinalTranscriptionProgress(null);
     }
   }, [refreshSessions, stopRecording]);
 
@@ -274,6 +308,74 @@ export function App(): JSX.Element {
     [refreshSessions, selectedSession]
   );
 
+  // 제목, 전사 텍스트, 메모 변경을 초안 또는 저장된 세션에 반영한다.
+  const handleSaveDetails = useCallback(
+    async (details: Omit<SessionDetailsUpdateRequest, 'sessionId'>) => {
+      const draft = draftSessionRef.current;
+
+      if (draft) {
+        setDraftSession({
+          ...draft,
+          title: details.title?.trim() || draft.title,
+          transcriptText: details.transcriptText ?? draft.transcriptText,
+          memo: details.memo ?? draft.memo,
+          updatedAt: new Date().toISOString()
+        });
+        return;
+      }
+
+      if (!selectedSession) {
+        return;
+      }
+
+      try {
+        const updatedSession = await window.meetingRecorder.updateSessionDetails({
+          sessionId: selectedSession.id,
+          ...details
+        });
+        setSelectedSession(updatedSession);
+        await refreshSessions();
+      } catch (error) {
+        setAppError(error instanceof Error ? error.message : '회의 정보를 저장하지 못했습니다.');
+      }
+    },
+    [refreshSessions, selectedSession]
+  );
+
+  // 선택된 회의의 원본 녹음 파일을 사용자가 고른 위치로 저장한다.
+  const handleExportAudio = useCallback(async () => {
+    if (!selectedSession) {
+      return;
+    }
+
+    try {
+      await window.meetingRecorder.exportAudio(selectedSession.id);
+    } catch (error) {
+      setAppError(error instanceof Error ? error.message : '녹음 파일 내보내기에 실패했습니다.');
+    }
+  }, [selectedSession]);
+
+  // 저장된 회의 폴더를 삭제하고 목록을 갱신한다.
+  const handleDeleteSession = useCallback(async () => {
+    if (!selectedSession) {
+      return;
+    }
+
+    const shouldDelete = window.confirm(`"${selectedSession.title}" 회의를 삭제할까요?`);
+
+    if (!shouldDelete) {
+      return;
+    }
+
+    try {
+      await window.meetingRecorder.deleteSession(selectedSession.id);
+      setSelectedSession(null);
+      await refreshSessions();
+    } catch (error) {
+      setAppError(error instanceof Error ? error.message : '회의를 삭제하지 못했습니다.');
+    }
+  }, [refreshSessions, selectedSession]);
+
   // 선택된 회의의 텍스트 회의록을 사용자가 고른 위치로 저장한다.
   const handleExportTranscript = useCallback(async () => {
     if (!selectedSession) {
@@ -309,6 +411,7 @@ export function App(): JSX.Element {
         <RecorderPanel
           elapsedMs={elapsedMs}
           error={appError ?? recorderError}
+          progressPercent={finalTranscriptionProgress?.progress}
           isLivePreviewing={isLivePreviewing}
           status={visibleStatus}
           onStart={handleStartRecording}
@@ -320,11 +423,18 @@ export function App(): JSX.Element {
             session={activeSession}
             onExport={selectedSession && !draftSession ? handleExportTranscript : undefined}
           />
-          <SpeakerEditor
-            disabled={!activeSession}
-            session={activeSession}
-            onRename={handleRenameSpeaker}
-          />
+          <div className="sideStack">
+            <SessionManagementPanel
+              allowDelete={Boolean(selectedSession && !draftSession && recordingStatus !== 'recording' && !isSaving)}
+              disabled={isSaving}
+              session={activeSession}
+              transcriptionProgress={isSaving ? finalTranscriptionProgress : null}
+              onDeleteSession={handleDeleteSession}
+              onExportAudio={handleExportAudio}
+              onSaveDetails={handleSaveDetails}
+            />
+            <SpeakerEditor disabled={!activeSession || isSaving} session={activeSession} onRename={handleRenameSpeaker} />
+          </div>
         </section>
       </main>
     </div>

@@ -34,6 +34,8 @@ export function createDraftMeetingSession(now = new Date()): MeetingSession {
     updatedAt: isoTime,
     durationMs: 0,
     speakers: createDefaultSpeakers(),
-    segments: []
+    segments: [],
+    transcriptText: '',
+    memo: ''
   };
 }

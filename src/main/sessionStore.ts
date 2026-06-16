@@ -1,11 +1,15 @@
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type {
+  AudioFilePayload,
+  DeleteSessionResult,
   MeetingSession,
   MeetingSessionSummary,
   SaveMeetingSessionRequest,
+  SessionDetailsUpdateRequest,
   SpeakerUpdateRequest
 } from '../shared/types';
+import { buildTranscriptText, formatTranscriptDocument } from '../shared/transcriptFormatter';
 
 const SESSION_FILE_NAME = 'session.json';
 const AUDIO_FILE_NAME = 'recording.webm';
@@ -51,28 +55,19 @@ export class MeetingSessionStore {
     const sessionDirectory = this.getSessionDirectory(session.id);
     await mkdir(sessionDirectory, { recursive: true });
 
-    const normalizedSession: MeetingSession = {
+    const normalizedSession = normalizeSession({
       ...session,
       audioFileName: request.audioData ? AUDIO_FILE_NAME : session.audioFileName,
       audioMimeType: request.audioMimeType ?? session.audioMimeType,
       updatedAt: new Date().toISOString()
-    };
+    });
 
     if (request.audioData) {
       const audioPath = path.join(sessionDirectory, AUDIO_FILE_NAME);
       await writeFile(audioPath, Buffer.from(request.audioData));
     }
 
-    await writeFile(
-      path.join(sessionDirectory, SESSION_FILE_NAME),
-      JSON.stringify(normalizedSession, null, 2),
-      'utf-8'
-    );
-    await writeFile(
-      path.join(sessionDirectory, TRANSCRIPT_FILE_NAME),
-      formatTranscript(normalizedSession),
-      'utf-8'
-    );
+    await this.writeSession(normalizedSession);
 
     return normalizedSession;
   }
@@ -93,18 +88,36 @@ export class MeetingSessionStore {
         speaker.id === request.speakerId ? { ...speaker, name: request.name.trim() } : speaker
       )
     };
+    const previousGeneratedText = buildTranscriptText(session);
+    const nextTranscriptText =
+      session.transcriptText.trim() === previousGeneratedText.trim()
+        ? buildTranscriptText(updatedSession)
+        : session.transcriptText;
 
-    await writeFile(
-      this.getSessionFilePath(updatedSession.id),
-      JSON.stringify(updatedSession, null, 2),
-      'utf-8'
-    );
-    await writeFile(
-      path.join(this.getSessionDirectory(updatedSession.id), TRANSCRIPT_FILE_NAME),
-      formatTranscript(updatedSession),
-      'utf-8'
-    );
+    await this.writeSession({ ...updatedSession, transcriptText: nextTranscriptText });
 
+    return { ...updatedSession, transcriptText: nextTranscriptText };
+  }
+
+  // 제목, 전사 텍스트, 메모처럼 사용자가 직접 편집하는 세션 정보를 저장한다.
+  async updateSessionDetails(request: SessionDetailsUpdateRequest): Promise<MeetingSession> {
+    assertSafeSessionId(request.sessionId);
+    const session = await this.readSession(request.sessionId);
+
+    if (!session) {
+      throw new Error('회의 세션을 찾을 수 없습니다.');
+    }
+
+    const title = request.title?.trim();
+    const updatedSession: MeetingSession = {
+      ...session,
+      title: title || session.title,
+      transcriptText: request.transcriptText ?? session.transcriptText,
+      memo: request.memo ?? session.memo,
+      updatedAt: new Date().toISOString()
+    };
+
+    await this.writeSession(updatedSession);
     return updatedSession;
   }
 
@@ -117,7 +130,45 @@ export class MeetingSessionStore {
       throw new Error('내보낼 회의 세션을 찾을 수 없습니다.');
     }
 
-    await writeFile(targetPath, formatTranscript(session), 'utf-8');
+    await writeFile(targetPath, formatTranscriptDocument(session), 'utf-8');
+  }
+
+  // 저장된 녹음 파일을 렌더러가 재생할 수 있도록 바이트로 읽어 반환한다.
+  async getAudioFile(sessionId: string): Promise<AudioFilePayload | null> {
+    assertSafeSessionId(sessionId);
+    const session = await this.readSession(sessionId);
+
+    if (!session?.audioFileName) {
+      return null;
+    }
+
+    const audioPath = path.join(this.getSessionDirectory(session.id), session.audioFileName);
+    const audioData = await readFile(audioPath);
+
+    return {
+      fileName: session.audioFileName,
+      audioMimeType: session.audioMimeType,
+      audioData: new Uint8Array(audioData)
+    };
+  }
+
+  // 사용자가 고른 위치로 원본 녹음 파일을 복사한다.
+  async exportAudio(sessionId: string, targetPath: string): Promise<void> {
+    assertSafeSessionId(sessionId);
+    const session = await this.readSession(sessionId);
+
+    if (!session?.audioFileName) {
+      throw new Error('내보낼 녹음 파일이 없습니다.');
+    }
+
+    await copyFile(path.join(this.getSessionDirectory(session.id), session.audioFileName), targetPath);
+  }
+
+  // 세션 폴더 전체를 삭제해 녹음 파일, JSON, 텍스트 스냅샷을 함께 제거한다.
+  async deleteSession(sessionId: string): Promise<DeleteSessionResult> {
+    assertSafeSessionId(sessionId);
+    await rm(this.getSessionDirectory(sessionId), { recursive: true, force: true });
+    return { deleted: true };
   }
 
   // 세션 ID에 해당하는 폴더 경로를 반환한다.
@@ -135,10 +186,20 @@ export class MeetingSessionStore {
     try {
       assertSafeSessionId(id);
       const raw = await readFile(this.getSessionFilePath(id), 'utf-8');
-      return JSON.parse(raw) as MeetingSession;
+      return normalizeSession(JSON.parse(raw) as MeetingSession);
     } catch {
       return null;
     }
+  }
+
+  // 세션 JSON과 사람이 읽는 텍스트 파일을 동일한 내용으로 저장한다.
+  private async writeSession(session: MeetingSession): Promise<void> {
+    await writeFile(this.getSessionFilePath(session.id), JSON.stringify(session, null, 2), 'utf-8');
+    await writeFile(
+      path.join(this.getSessionDirectory(session.id), TRANSCRIPT_FILE_NAME),
+      formatTranscriptDocument(session),
+      'utf-8'
+    );
   }
 }
 
@@ -156,25 +217,18 @@ function toSummary(session: MeetingSession): MeetingSessionSummary {
   };
 }
 
-// 저장된 전사 데이터를 사람이 읽기 쉬운 텍스트 파일로 변환한다.
-function formatTranscript(session: MeetingSession): string {
-  const speakerMap = new Map(session.speakers.map((speaker) => [speaker.id, speaker.name]));
-  const header = [`# ${session.title}`, `생성: ${session.createdAt}`, `수정: ${session.updatedAt}`, ''];
-  const lines = session.segments.map((segment) => {
-    const speakerName = speakerMap.get(segment.speakerId) ?? '알 수 없는 화자';
-    const overlapLabel = segment.isOverlapped ? ' [동시 발화]' : '';
-    return `[${formatTime(segment.startMs)} - ${formatTime(segment.endMs)}] ${speakerName}${overlapLabel}: ${segment.text}`;
-  });
+// 오래된 세션 파일에 없는 필드를 현재 앱 모델에 맞게 채운다.
+function normalizeSession(session: MeetingSession): MeetingSession {
+  const normalizedSession = {
+    ...session,
+    memo: session.memo ?? '',
+    transcriptText: session.transcriptText ?? ''
+  };
 
-  return [...header, ...lines, ''].join('\n');
-}
-
-// 밀리초 시간을 텍스트 회의록용 mm:ss 형식으로 바꾼다.
-function formatTime(valueMs: number): string {
-  const totalSeconds = Math.max(0, Math.floor(valueMs / 1000));
-  const minutes = String(Math.floor(totalSeconds / 60)).padStart(2, '0');
-  const seconds = String(totalSeconds % 60).padStart(2, '0');
-  return `${minutes}:${seconds}`;
+  return {
+    ...normalizedSession,
+    transcriptText: normalizedSession.transcriptText || buildTranscriptText(normalizedSession)
+  };
 }
 
 // 세션 ID가 경로 밖으로 나가지 못하도록 허용 문자를 제한한다.

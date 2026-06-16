@@ -7,6 +7,7 @@ interface RecorderPanelProps {
   elapsedMs: number;
   error: string | null;
   isLivePreviewing?: boolean;
+  progressPercent?: number;
   onStart(): void;
   onStop(): void;
 }
@@ -17,12 +18,22 @@ export function RecorderPanel({
   elapsedMs,
   error,
   isLivePreviewing = false,
+  progressPercent,
   onStart,
   onStop
 }: RecorderPanelProps): JSX.Element {
   const isRecording = status === 'recording';
   const isSaving = status === 'saving';
-  const statusLabel = isSaving ? '저장 중' : isLivePreviewing ? '전사 중' : isRecording ? '녹음 중' : '대기';
+  const statusLabel =
+    isSaving && typeof progressPercent === 'number'
+      ? `전사 중 ${Math.round(progressPercent)}%`
+      : isSaving
+        ? '저장 중'
+        : isLivePreviewing
+          ? '전사 중'
+          : isRecording
+            ? '녹음 중'
+            : '대기';
 
   return (
     <section className="recorderPanel">

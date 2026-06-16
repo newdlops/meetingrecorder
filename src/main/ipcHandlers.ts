@@ -4,6 +4,7 @@ import type { MeetingSessionStore } from './sessionStore';
 import type {
   OfflineTranscriptionRequest,
   SaveMeetingSessionRequest,
+  SessionDetailsUpdateRequest,
   SpeakerUpdateRequest
 } from '../shared/types';
 
@@ -24,6 +25,31 @@ export function registerIpcHandlers(
     store.updateSpeakerName(request)
   );
 
+  ipcMain.handle('session:update-details', async (_event, request: SessionDetailsUpdateRequest) =>
+    store.updateSessionDetails(request)
+  );
+
+  ipcMain.handle('session:get-audio', async (_event, sessionId: string) => store.getAudioFile(sessionId));
+
+  ipcMain.handle('session:export-audio', async (_event, sessionId: string) => {
+    const session = await store.getSession(sessionId);
+    const defaultName = session?.audioFileName ?? 'recording.webm';
+    const result = await dialog.showSaveDialog({
+      title: '녹음 파일 저장',
+      defaultPath: defaultName,
+      filters: [{ name: 'Audio', extensions: ['webm', 'mp4', 'wav', 'm4a'] }]
+    });
+
+    if (result.canceled || !result.filePath) {
+      return { canceled: true };
+    }
+
+    await store.exportAudio(sessionId, result.filePath);
+    return { canceled: false, filePath: result.filePath };
+  });
+
+  ipcMain.handle('session:delete', async (_event, sessionId: string) => store.deleteSession(sessionId));
+
   ipcMain.handle('session:export-transcript', async (_event, sessionId: string) => {
     const result = await dialog.showSaveDialog({
       title: '회의록 저장',
@@ -39,7 +65,9 @@ export function registerIpcHandlers(
     return { canceled: false, filePath: result.filePath };
   });
 
-  ipcMain.handle('transcription:offline', async (_event, request: OfflineTranscriptionRequest) =>
-    transcriptionService.transcribe(request)
+  ipcMain.handle('transcription:offline', async (event, request: OfflineTranscriptionRequest) =>
+    transcriptionService.transcribe(request, (progress) => {
+      event.sender.send('transcription:progress', progress);
+    })
   );
 }

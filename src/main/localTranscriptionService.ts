@@ -3,12 +3,14 @@ import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { spawn } from 'node:child_process';
 import ffmpegPath from 'ffmpeg-static';
-import type { OfflineTranscriptionRequest, OfflineTranscriptionResult } from '../shared/types';
-
-const execFileAsync = promisify(execFile);
+import type {
+  OfflineTranscriptionRequest,
+  OfflineTranscriptionResult,
+  TranscriptionProgressEvent,
+  TranscriptionProgressStage
+} from '../shared/types';
 
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_STT_LANGUAGE = 'ko';
@@ -17,18 +19,23 @@ const DEFAULT_STT_TASK = 'transcribe';
 const DEFAULT_PREVIEW_BATCH_SIZE = '2';
 const DEFAULT_PREVIEW_THREAD_COUNT = '2';
 
+type ProgressCallback = (progress: TranscriptionProgressEvent) => void;
+
 // WhisperX 기반 Python worker를 실행해 오프라인 전사/화자분리 결과를 만든다.
 export class LocalTranscriptionService {
   constructor(private readonly appRoot = app.getAppPath()) {}
 
   // 렌더러에서 받은 오디오 바이트를 임시 파일로 저장한 뒤 worker에 전달한다.
-  async transcribe(request: OfflineTranscriptionRequest): Promise<OfflineTranscriptionResult> {
+  async transcribe(
+    request: OfflineTranscriptionRequest,
+    onProgress?: ProgressCallback
+  ): Promise<OfflineTranscriptionResult> {
     const tempDirectory = await mkdtemp(path.join(tmpdir(), 'meeting-recorder-'));
     const audioPath = path.join(tempDirectory, this.getAudioFileName(request.audioMimeType));
 
     try {
       await writeFile(audioPath, Buffer.from(request.audioData));
-      return await this.runWorker(audioPath, request);
+      return await this.runWorker(audioPath, request, onProgress);
     } finally {
       await rm(tempDirectory, { recursive: true, force: true });
     }
@@ -37,7 +44,8 @@ export class LocalTranscriptionService {
   // Python worker 실행 인자를 구성하고 JSON 결과를 파싱한다.
   private async runWorker(
     audioPath: string,
-    request: OfflineTranscriptionRequest
+    request: OfflineTranscriptionRequest,
+    onProgress?: ProgressCallback
   ): Promise<OfflineTranscriptionResult> {
     const pythonPath = this.getPythonPath();
     const workerPath = this.getWorkerPath();
@@ -66,6 +74,8 @@ export class LocalTranscriptionService {
 
     if (isPreviewRequest) {
       args.push('--transcribe-only');
+    } else {
+      args.push('--progress');
     }
 
     this.appendOptionalArg(args, '--batch-size', this.getBatchSize(isPreviewRequest));
@@ -79,16 +89,112 @@ export class LocalTranscriptionService {
 
     try {
       const workerEnv = await this.createWorkerEnvironment();
-      const { stdout } = await execFileAsync(pythonPath, args, {
-        timeout,
-        maxBuffer: 1024 * 1024 * 64,
-        env: workerEnv
-      });
-
-      return this.parseWorkerOutput(stdout);
+      const stdout = await this.executeWorker(pythonPath, args, workerEnv, timeout, request, onProgress);
+      const result = this.parseWorkerOutput(stdout);
+      this.emitProgress(request, onProgress, 'done', 100, '전사 완료');
+      return result;
     } catch (error) {
       throw new Error(this.formatWorkerError(error));
     }
+  }
+
+  // Python worker stdout을 줄 단위로 읽어 진행률 이벤트와 최종 JSON을 동시에 수집한다.
+  private executeWorker(
+    pythonPath: string,
+    args: string[],
+    env: NodeJS.ProcessEnv,
+    timeout: number,
+    request: OfflineTranscriptionRequest,
+    onProgress?: ProgressCallback
+  ): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const child = spawn(pythonPath, args, { env });
+      const stdoutLines: string[] = [];
+      const stderrChunks: string[] = [];
+      let stdoutBuffer = '';
+      let latestProgress: TranscriptionProgressEvent | null = null;
+      let isSettled = false;
+      let timeoutId: NodeJS.Timeout;
+      let heartbeatId: NodeJS.Timeout;
+
+      const rejectWithError = (message: string) => {
+        if (isSettled) {
+          return;
+        }
+
+        isSettled = true;
+        clearTimeout(timeoutId);
+        clearInterval(heartbeatId);
+        reject({ message, stderr: stderrChunks.join('') });
+      };
+
+      const resolveWithOutput = () => {
+        if (isSettled) {
+          return;
+        }
+
+        isSettled = true;
+        clearTimeout(timeoutId);
+        clearInterval(heartbeatId);
+        resolve(stdoutLines.join('\n'));
+      };
+
+      timeoutId = setTimeout(() => {
+        child.kill();
+        rejectWithError(`전사 엔진 실행 시간이 초과되었습니다. (${Math.round(timeout / 1000)}초)`);
+      }, timeout);
+
+      heartbeatId = setInterval(() => {
+        if (!latestProgress) {
+          return;
+        }
+
+        const nextProgress = Math.min(
+          this.getStageProgressCap(latestProgress.stage),
+          latestProgress.progress + 1
+        );
+
+        if (nextProgress > latestProgress.progress) {
+          latestProgress = { ...latestProgress, progress: nextProgress };
+          onProgress?.(latestProgress);
+        }
+      }, 1000);
+
+      const handleStdoutLine = (line: string) => {
+        stdoutLines.push(line);
+        const progress = this.parseProgressOutput(line, request);
+
+        if (progress) {
+          latestProgress = progress;
+          onProgress?.(progress);
+        }
+      };
+
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdoutBuffer += chunk.toString('utf-8');
+        const lines = stdoutBuffer.split(/\r?\n/);
+        stdoutBuffer = lines.pop() ?? '';
+        lines.map((line) => line.trim()).filter(Boolean).forEach(handleStdoutLine);
+      });
+
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderrChunks.push(chunk.toString('utf-8'));
+      });
+
+      child.on('error', (error) => rejectWithError(error.message));
+      child.on('close', (code) => {
+        if (stdoutBuffer.trim()) {
+          handleStdoutLine(stdoutBuffer.trim());
+        }
+
+        if (code === 0) {
+          resolveWithOutput();
+          return;
+        }
+
+        rejectWithError(`전사 엔진이 종료 코드 ${code ?? 'unknown'}로 실패했습니다.`);
+      });
+    });
   }
 
   // MIME 타입에 따라 ffmpeg/torchcodec이 이해하기 쉬운 임시 파일 확장자를 고른다.
@@ -208,6 +314,71 @@ export class LocalTranscriptionService {
     }
   }
 
+  // 미리보기 요청을 제외한 최종 전사 진행률만 렌더러로 전달한다.
+  private emitProgress(
+    request: OfflineTranscriptionRequest,
+    onProgress: ProgressCallback | undefined,
+    stage: TranscriptionProgressStage,
+    progress: number,
+    message: string
+  ): void {
+    if (!onProgress || request.mode === 'preview') {
+      return;
+    }
+
+    onProgress({
+      sessionId: request.sessionId,
+      mode: request.mode ?? 'final',
+      stage,
+      progress: Math.max(0, Math.min(100, progress)),
+      message
+    });
+  }
+
+  // worker가 출력한 progress JSON이면 앱 진행률 이벤트로 변환한다.
+  private parseProgressOutput(
+    line: string,
+    request: OfflineTranscriptionRequest
+  ): TranscriptionProgressEvent | null {
+    if (request.mode === 'preview' || !line.startsWith('{') || !line.endsWith('}')) {
+      return null;
+    }
+
+    try {
+      const parsed = JSON.parse(line) as Partial<TranscriptionProgressEvent> & { type?: string };
+
+      if (parsed.type !== 'progress' || typeof parsed.progress !== 'number' || !parsed.stage) {
+        return null;
+      }
+
+      return {
+        sessionId: request.sessionId,
+        mode: request.mode ?? 'final',
+        stage: parsed.stage,
+        progress: Math.max(0, Math.min(100, Math.round(parsed.progress))),
+        message: typeof parsed.message === 'string' ? parsed.message : '전사 진행 중'
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  // 오래 걸리는 단계에서 보정 진행률이 지나치게 앞서가지 않도록 단계별 상한을 둔다.
+  private getStageProgressCap(stage: TranscriptionProgressStage): number {
+    const caps: Record<TranscriptionProgressStage, number> = {
+      prepare: 8,
+      model: 18,
+      audio: 24,
+      transcribe: 58,
+      align: 70,
+      diarize: 92,
+      save: 98,
+      done: 100
+    };
+
+    return caps[stage];
+  }
+
   // 미리보기 전사는 녹음 안정성을 위해 작은 배치로 돌리고, 최종 전사는 기본값을 유지한다.
   private getBatchSize(isPreviewRequest: boolean): string | undefined {
     if (isPreviewRequest) {
@@ -283,6 +454,10 @@ export class LocalTranscriptionService {
       if (stderr) {
         return stderr.split('\n').slice(-8).join('\n');
       }
+    }
+
+    if (typeof error === 'object' && error && 'message' in error) {
+      return String((error as { message?: string }).message ?? '오프라인 전사 엔진 실행에 실패했습니다.');
     }
 
     if (error instanceof Error) {

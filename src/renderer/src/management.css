@@ -1,0 +1,104 @@
+.sideStack {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+.managementForm,
+.fieldBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.managementForm {
+  gap: 14px;
+}
+
+.fieldBlock span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #526265;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.fieldBlock input,
+.fieldBlock textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 11px;
+  color: #243133;
+  background: #f8fbfb;
+  border: 1px solid #cedbdd;
+  border-radius: 8px;
+}
+
+.fieldBlock textarea {
+  min-height: 116px;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.fieldBlock input:focus,
+.fieldBlock textarea:focus {
+  outline: 2px solid rgba(31, 122, 140, 0.26);
+  border-color: #1f7a8c;
+}
+
+.audioBlock {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.audioBlock audio {
+  width: 100%;
+  min-width: 0;
+  height: 38px;
+}
+
+.managementActions {
+  display: flex;
+  gap: 10px;
+}
+
+.progressBlock {
+  padding: 12px;
+  background: #f7faf9;
+  border: 1px solid #dfe7e9;
+  border-radius: 8px;
+}
+
+.progressHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: #526265;
+  font-size: 13px;
+}
+
+.progressHeader strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progressTrack {
+  height: 8px;
+  overflow: hidden;
+  background: #d9e2e4;
+  border-radius: 999px;
+}
+
+.progressTrack span {
+  display: block;
+  height: 100%;
+  background: #1f7a8c;
+  transition: width 180ms ease;
+}

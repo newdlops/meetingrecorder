@@ -57,9 +57,30 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=4, help="WhisperX 배치 크기")
     parser.add_argument("--threads", type=int, help="CPU 추론 스레드 수")
     parser.add_argument("--transcribe-only", action="store_true", help="화자분리 없이 전사 결과만 반환")
+    parser.add_argument("--progress", action="store_true", help="stdout에 진행률 JSON 이벤트를 출력")
     parser.add_argument("--enable-align", action="store_true", help="외부 alignment 모델을 사용해 단어 타임스탬프를 보정")
     parser.add_argument("--offline-only", action="store_true", help="로컬 캐시 모델만 사용")
     return parser.parse_args()
+
+
+def emit_progress(args: argparse.Namespace, stage: str, progress: int, message: str) -> None:
+    """Electron 메인 프로세스가 읽을 수 있도록 진행률 이벤트를 한 줄 JSON으로 출력한다."""
+
+    if not args.progress:
+        return
+
+    print(
+        json.dumps(
+            {
+                "type": "progress",
+                "stage": stage,
+                "progress": progress,
+                "message": message,
+            },
+            ensure_ascii=False,
+        ),
+        flush=True,
+    )
 
 
 def import_engine_modules() -> Any:
@@ -111,6 +132,7 @@ def call_with_supported_kwargs(function: Any, *args: Any, **kwargs: Any) -> Any:
 def transcribe_audio(whisperx: Any, args: argparse.Namespace) -> dict[str, Any]:
     """WhisperX로 음성을 텍스트와 단어 타임스탬프로 변환한다."""
 
+    emit_progress(args, "model", 8, "전사 모델을 불러오는 중")
     model = call_with_supported_kwargs(
         whisperx.load_model,
         args.model,
@@ -121,7 +143,9 @@ def transcribe_audio(whisperx: Any, args: argparse.Namespace) -> dict[str, Any]:
         local_files_only=args.offline_only,
         threads=args.threads,
     )
+    emit_progress(args, "audio", 20, "오디오를 분석하는 중")
     audio = whisperx.load_audio(args.audio)
+    emit_progress(args, "transcribe", 25, "음성을 텍스트로 변환하는 중")
     result = call_with_supported_kwargs(
         model.transcribe,
         audio,
@@ -129,6 +153,7 @@ def transcribe_audio(whisperx: Any, args: argparse.Namespace) -> dict[str, Any]:
         language=args.language,
         task=args.task,
     )
+    emit_progress(args, "transcribe", 60, "텍스트 변환 완료")
     result["_audio"] = audio
     return result
 
@@ -137,14 +162,17 @@ def align_words(whisperx: Any, result: dict[str, Any], args: argparse.Namespace)
     """가능하면 언어별 alignment 모델로 단어 타임스탬프를 보정한다."""
 
     if not args.enable_align:
+        emit_progress(args, "align", 68, "단어 시간 보정을 건너뜀")
         return result
 
     language = result.get("language") or args.language
 
     if not language:
+        emit_progress(args, "align", 68, "단어 시간 보정을 건너뜀")
         return result
 
     try:
+        emit_progress(args, "align", 64, "단어 시간을 보정하는 중")
         model, metadata = call_with_supported_kwargs(
             whisperx.load_align_model,
             language_code=language,
@@ -161,9 +189,11 @@ def align_words(whisperx: Any, result: dict[str, Any], args: argparse.Namespace)
         )
         aligned_result["_audio"] = result["_audio"]
         aligned_result["language"] = language
+        emit_progress(args, "align", 70, "단어 시간 보정 완료")
         return aligned_result
     except Exception as error:
         print(f"단어 alignment를 건너뜁니다: {error}", file=sys.stderr)
+        emit_progress(args, "align", 68, "단어 시간 보정을 건너뜀")
         return result
 
 
@@ -348,6 +378,7 @@ def main() -> int:
     configure_offline_mode(args.offline_only)
 
     try:
+        emit_progress(args, "prepare", 3, "전사 엔진을 준비하는 중")
         whisperx = import_engine_modules()
         result = transcribe_audio(whisperx, args)
         if args.transcribe_only:
@@ -355,7 +386,10 @@ def main() -> int:
             return 0
 
         result = align_words(whisperx, result, args)
+        emit_progress(args, "diarize", 72, "화자를 분리하는 중")
         turns = diarize_audio(result["_audio"], args)
+        emit_progress(args, "diarize", 90, "화자 분리 완료")
+        emit_progress(args, "save", 96, "전사 결과를 정리하는 중")
         print(json.dumps(build_output(result, turns), ensure_ascii=False))
         return 0
     except Exception as error:

@@ -29,6 +29,8 @@ export interface MeetingSession {
   audioMimeType?: string;
   speakers: SpeakerProfile[];
   segments: TranscriptSegment[];
+  transcriptText: string;
+  memo: string;
 }
 
 export interface MeetingSessionSummary {
@@ -54,13 +56,40 @@ export interface SpeakerUpdateRequest {
   name: string;
 }
 
+export interface SessionDetailsUpdateRequest {
+  sessionId: string;
+  title?: string;
+  transcriptText?: string;
+  memo?: string;
+}
+
 export interface ExportTranscriptResult {
   canceled: boolean;
   filePath?: string;
 }
 
+export interface AudioFilePayload {
+  fileName: string;
+  audioMimeType?: string;
+  audioData: Uint8Array;
+}
+
+export interface DeleteSessionResult {
+  deleted: boolean;
+}
+
 // 최종 저장용 전사와 녹음 중 미리보기 전사를 구분한다.
 export type OfflineTranscriptionMode = 'final' | 'preview';
+
+export type TranscriptionProgressStage =
+  | 'prepare'
+  | 'model'
+  | 'audio'
+  | 'transcribe'
+  | 'align'
+  | 'diarize'
+  | 'save'
+  | 'done';
 
 export interface OfflineTranscriptionRequest {
   sessionId: string;
@@ -79,11 +108,24 @@ export interface OfflineTranscriptionResult {
   engineName: string;
 }
 
+export interface TranscriptionProgressEvent {
+  sessionId: string;
+  mode: OfflineTranscriptionMode;
+  stage: TranscriptionProgressStage;
+  progress: number;
+  message: string;
+}
+
 export interface MeetingRecorderApi {
   listSessions(): Promise<MeetingSessionSummary[]>;
   getSession(id: string): Promise<MeetingSession | null>;
   saveSession(request: SaveMeetingSessionRequest): Promise<MeetingSession>;
   updateSpeakerName(request: SpeakerUpdateRequest): Promise<MeetingSession>;
+  updateSessionDetails(request: SessionDetailsUpdateRequest): Promise<MeetingSession>;
+  getAudioFile(sessionId: string): Promise<AudioFilePayload | null>;
+  exportAudio(sessionId: string): Promise<ExportTranscriptResult>;
+  deleteSession(sessionId: string): Promise<DeleteSessionResult>;
   exportTranscript(sessionId: string): Promise<ExportTranscriptResult>;
   transcribeOffline(request: OfflineTranscriptionRequest): Promise<OfflineTranscriptionResult>;
+  onTranscriptionProgress(listener: (event: TranscriptionProgressEvent) => void): () => void;
 }
