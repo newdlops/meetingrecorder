@@ -23,6 +23,11 @@ from worker import (
     configure_offline_mode,
     import_engine_modules,
 )
+from quality_transcription import (
+    add_quality_args,
+    should_use_standard_decoder,
+    transcribe_audio_with_standard_decoder,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -53,6 +58,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vad-offset", type=float, default=0.25, help="VAD 발화 종료 민감도")
     parser.add_argument("--enable-align", action="store_true", help="외부 alignment 모델을 사용해 단어 타임스탬프를 보정")
     parser.add_argument("--offline-only", action="store_true", help="로컬 캐시 모델만 사용")
+    add_quality_args(parser)
     return parser.parse_args()
 
 
@@ -141,7 +147,18 @@ def process_request(whisperx: Any, model: Any, base_args: argparse.Namespace, re
 
     try:
         request_args = build_request_args(base_args, request)
-        result = transcribe_with_cached_model(whisperx, model, request_args, request_id, request)
+        if should_use_standard_decoder(request_args):
+            emit_progress(request_id, request, "model", 12, "전사 모델 준비 완료")
+            emit_progress(request_id, request, "audio", 20, "오디오를 분석하는 중")
+            audio = whisperx.load_audio(request_args.audio)
+            result = transcribe_audio_with_standard_decoder(
+                model,
+                audio,
+                request_args,
+                lambda stage, progress, message: emit_progress(request_id, request, stage, progress, message),
+            )
+        else:
+            result = transcribe_with_cached_model(whisperx, model, request_args, request_id, request)
 
         if request_args.transcribe_only:
             emit({"type": "result", "id": request_id, "result": build_transcription_only_output(result)})

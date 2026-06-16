@@ -20,6 +20,11 @@ from diarization import (
     get_overlap_group,
     get_speaker_label,
 )
+from quality_transcription import (
+    add_quality_args,
+    should_use_standard_decoder,
+    transcribe_audio_with_standard_decoder,
+)
 
 DEFAULT_LANGUAGE = "ko"
 DEFAULT_TASK = "transcribe"
@@ -65,6 +70,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vad-offset", type=float, default=0.25, help="VAD 발화 종료 민감도")
     parser.add_argument("--enable-align", action="store_true", help="외부 alignment 모델을 사용해 단어 타임스탬프를 보정")
     parser.add_argument("--offline-only", action="store_true", help="로컬 캐시 모델만 사용")
+    add_quality_args(parser)
     return parser.parse_args()
 
 
@@ -172,6 +178,14 @@ def transcribe_audio(whisperx: Any, args: argparse.Namespace) -> dict[str, Any]:
     )
     emit_progress(args, "audio", 20, "오디오를 분석하는 중")
     audio = whisperx.load_audio(args.audio)
+    if should_use_standard_decoder(args):
+        return transcribe_audio_with_standard_decoder(
+            model,
+            audio,
+            args,
+            lambda stage, progress, message: emit_progress(args, stage, progress, message),
+        )
+
     emit_progress(args, "transcribe", 25, "음성을 텍스트로 변환하는 중")
     result = call_with_supported_kwargs(
         model.transcribe,

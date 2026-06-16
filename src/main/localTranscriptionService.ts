@@ -104,6 +104,22 @@ export class LocalTranscriptionService {
     );
     this.appendOptionalArg(args, '--vad-onset', process.env.MEETING_RECORDER_STT_VAD_ONSET);
     this.appendOptionalArg(args, '--vad-offset', process.env.MEETING_RECORDER_STT_VAD_OFFSET);
+    this.appendOptionalArg(args, '--final-decoder', process.env.MEETING_RECORDER_STT_FINAL_DECODER);
+    this.appendOptionalArg(args, '--final-beam-size', process.env.MEETING_RECORDER_STT_FINAL_BEAM_SIZE);
+    this.appendOptionalArg(args, '--final-patience', process.env.MEETING_RECORDER_STT_FINAL_PATIENCE);
+    this.appendOptionalArg(
+      args,
+      '--final-repetition-penalty',
+      process.env.MEETING_RECORDER_STT_FINAL_REPETITION_PENALTY
+    );
+    this.appendOptionalArg(
+      args,
+      '--final-min-silence-duration-ms',
+      process.env.MEETING_RECORDER_STT_FINAL_MIN_SILENCE_MS
+    );
+    this.appendOptionalArg(args, '--final-speech-pad-ms', process.env.MEETING_RECORDER_STT_FINAL_SPEECH_PAD_MS);
+    this.appendOptionalArg(args, '--initial-prompt', process.env.MEETING_RECORDER_STT_INITIAL_PROMPT);
+    this.appendOptionalArg(args, '--hotwords', process.env.MEETING_RECORDER_STT_HOTWORDS);
 
     if (process.env.MEETING_RECORDER_STT_ALLOW_DOWNLOAD !== '1') {
       args.push('--offline-only');
