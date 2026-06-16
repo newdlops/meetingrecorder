@@ -8,22 +8,44 @@ import { useRecorder } from './hooks/useRecorder';
 import { createDraftMeetingSession } from './services/meetingFactory';
 import { transcribeRecordedAudio } from './services/offlineTranscription';
 
+// 녹음 안정성을 우선하기 위해 미리보기 전사는 여유 있는 간격으로만 실행한다.
+const LIVE_PREVIEW_INITIAL_DELAY_MS = 20_000;
+const LIVE_PREVIEW_INTERVAL_MS = 30_000;
+const LIVE_PREVIEW_MIN_NEW_AUDIO_MS = 15_000;
+
 // 전체 앱 상태를 조율하고 메인 프로세스 IPC API를 호출한다.
 export function App(): JSX.Element {
-  const recorder = useRecorder();
+  const {
+    status: recordingStatus,
+    elapsedMs,
+    error: recorderError,
+    startRecording,
+    stopRecording,
+    createRecordingSnapshot
+  } = useRecorder();
   const draftSessionRef = useRef<MeetingSession | null>(null);
+  const recordingStatusRef = useRef<RecordingStatus>(recordingStatus);
+  const livePreviewRunIdRef = useRef(0);
+  const livePreviewInFlightRef = useRef(false);
+  const livePreviewActiveRunRef = useRef<number | null>(null);
+  const livePreviewLastDurationRef = useRef(0);
   const [sessions, setSessions] = useState<MeetingSessionSummary[]>([]);
   const [selectedSession, setSelectedSession] = useState<MeetingSession | null>(null);
   const [draftSession, setDraftSession] = useState<MeetingSession | null>(null);
   const [isSaving, setIsSaving] = useState(false);
+  const [isLivePreviewing, setIsLivePreviewing] = useState(false);
   const [appError, setAppError] = useState<string | null>(null);
 
   const activeSession = draftSession ?? selectedSession;
-  const visibleStatus: RecordingStatus = isSaving ? 'saving' : recorder.status;
+  const visibleStatus: RecordingStatus = isSaving ? 'saving' : recordingStatus;
 
   useEffect(() => {
     draftSessionRef.current = draftSession;
   }, [draftSession]);
+
+  useEffect(() => {
+    recordingStatusRef.current = recordingStatus;
+  }, [recordingStatus]);
 
   // 저장된 회의 목록을 새로 읽는다.
   const refreshSessions = useCallback(async () => {
@@ -35,10 +57,108 @@ export function App(): JSX.Element {
     refreshSessions().catch((error) => setAppError(error.message));
   }, [refreshSessions]);
 
+  // 녹음 파일을 건드리지 않고 현재까지의 복사본만 보내 지연된 전사 미리보기를 갱신한다.
+  const runLivePreview = useCallback(
+    async (sessionId: string, runId: number) => {
+      if (livePreviewInFlightRef.current || recordingStatusRef.current !== 'recording') {
+        return;
+      }
+
+      const snapshot = await createRecordingSnapshot();
+      const hasEnoughAudio =
+        snapshot &&
+        snapshot.durationMs >= LIVE_PREVIEW_INITIAL_DELAY_MS &&
+        snapshot.durationMs - livePreviewLastDurationRef.current >= LIVE_PREVIEW_MIN_NEW_AUDIO_MS;
+
+      if (
+        !snapshot ||
+        !hasEnoughAudio ||
+        livePreviewRunIdRef.current !== runId ||
+        recordingStatusRef.current !== 'recording'
+      ) {
+        return;
+      }
+
+      livePreviewInFlightRef.current = true;
+      livePreviewActiveRunRef.current = runId;
+      livePreviewLastDurationRef.current = snapshot.durationMs;
+      setIsLivePreviewing(true);
+
+      try {
+        const payload = await transcribeRecordedAudio(sessionId, snapshot, {
+          mode: 'preview',
+          includeAudioData: false
+        });
+        const previewResult = payload.result;
+
+        if (
+          !previewResult ||
+          livePreviewRunIdRef.current !== runId ||
+          recordingStatusRef.current !== 'recording'
+        ) {
+          return;
+        }
+
+        setDraftSession((currentSession) => {
+          if (!currentSession || currentSession.id !== sessionId) {
+            return currentSession;
+          }
+
+          const hasPreviewSegments = previewResult.segments.length > 0;
+
+          return {
+            ...currentSession,
+            durationMs: snapshot.durationMs,
+            speakers: hasPreviewSegments ? previewResult.speakers : currentSession.speakers,
+            segments: hasPreviewSegments ? previewResult.segments : currentSession.segments,
+            updatedAt: new Date().toISOString()
+          };
+        });
+      } finally {
+        livePreviewInFlightRef.current = false;
+
+        if (livePreviewActiveRunRef.current === runId) {
+          livePreviewActiveRunRef.current = null;
+          setIsLivePreviewing(false);
+        }
+      }
+    },
+    [createRecordingSnapshot]
+  );
+
+  useEffect(() => {
+    if (recordingStatus !== 'recording' || !draftSession?.id) {
+      return;
+    }
+
+    const runId = livePreviewRunIdRef.current + 1;
+    const sessionId = draftSession.id;
+
+    livePreviewRunIdRef.current = runId;
+    livePreviewLastDurationRef.current = 0;
+
+    const requestPreview = () => {
+      void runLivePreview(sessionId, runId);
+    };
+    const initialTimerId = window.setTimeout(requestPreview, LIVE_PREVIEW_INITIAL_DELAY_MS);
+    const intervalTimerId = window.setInterval(requestPreview, LIVE_PREVIEW_INTERVAL_MS);
+
+    return () => {
+      window.clearTimeout(initialTimerId);
+      window.clearInterval(intervalTimerId);
+      livePreviewRunIdRef.current += 1;
+
+      if (livePreviewActiveRunRef.current === runId) {
+        livePreviewActiveRunRef.current = null;
+        setIsLivePreviewing(false);
+      }
+    };
+  }, [draftSession?.id, recordingStatus, runLivePreview]);
+
   // 목록에서 선택한 회의의 상세 데이터를 불러온다.
   const handleSelectSession = useCallback(
     async (id: string) => {
-      if (recorder.status === 'recording') {
+      if (recordingStatus === 'recording') {
         return;
       }
 
@@ -46,7 +166,7 @@ export function App(): JSX.Element {
       setDraftSession(null);
       setSelectedSession(session);
     },
-    [recorder.status]
+    [recordingStatus]
   );
 
   // 마이크 녹음을 시작하고 오프라인 전사용 회의 초안을 만든다.
@@ -54,7 +174,7 @@ export function App(): JSX.Element {
     setAppError(null);
 
     try {
-      await recorder.startRecording();
+      await startRecording();
 
       const nextSession = createDraftMeetingSession();
       setSelectedSession(null);
@@ -62,7 +182,7 @@ export function App(): JSX.Element {
     } catch (error) {
       setAppError(error instanceof Error ? error.message : '녹음을 시작할 수 없습니다.');
     }
-  }, [recorder]);
+  }, [startRecording]);
 
   // 녹음을 종료한 뒤 로컬 오프라인 엔진으로 전사하고 파일 저장소에 저장한다.
   const handleStopRecording = useCallback(async () => {
@@ -74,7 +194,7 @@ export function App(): JSX.Element {
     setAppError(null);
 
     try {
-      const recordedAudio = await recorder.stopRecording();
+      const recordedAudio = await stopRecording();
       const latestDraft = draftSessionRef.current;
 
       if (!latestDraft) {
@@ -110,7 +230,7 @@ export function App(): JSX.Element {
     } finally {
       setIsSaving(false);
     }
-  }, [recorder, refreshSessions]);
+  }, [refreshSessions, stopRecording]);
 
   // 저장된 회의의 화자명은 파일에 반영하고, 녹음 중 초안은 메모리만 수정한다.
   const handleRenameSpeaker = useCallback(
@@ -179,7 +299,7 @@ export function App(): JSX.Element {
         </div>
         <SessionList
           activeSessionId={activeSession?.id}
-          disabled={recorder.status === 'recording'}
+          disabled={recordingStatus === 'recording'}
           sessions={sessions}
           onSelect={handleSelectSession}
         />
@@ -187,8 +307,9 @@ export function App(): JSX.Element {
 
       <main className="workspace">
         <RecorderPanel
-          elapsedMs={recorder.elapsedMs}
-          error={appError ?? recorder.error}
+          elapsedMs={elapsedMs}
+          error={appError ?? recorderError}
+          isLivePreviewing={isLivePreviewing}
           status={visibleStatus}
           onStart={handleStartRecording}
           onStop={handleStopRecording}

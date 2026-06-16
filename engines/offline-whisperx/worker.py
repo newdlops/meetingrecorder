@@ -24,6 +24,8 @@ from diarization import (
 DEFAULT_LANGUAGE = "ko"
 DEFAULT_TASK = "transcribe"
 DEFAULT_CLUSTER_THRESHOLD = 0.5
+# 미리보기 전사는 아직 화자분리를 하지 않으므로 고정 화자로 표시한다.
+PREVIEW_SPEAKER = {"id": "speaker-preview", "name": "미리보기", "color": "#607d8b"}
 
 warnings.filterwarnings("ignore", message=r"\s*torchcodec is not installed correctly.*")
 warnings.filterwarnings("ignore", category=UserWarning, module=r"pyannote\.audio\.core\.io")
@@ -53,6 +55,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-speakers", type=int, help="예상 최소 화자 수")
     parser.add_argument("--max-speakers", type=int, help="예상 최대 화자 수")
     parser.add_argument("--batch-size", type=int, default=4, help="WhisperX 배치 크기")
+    parser.add_argument("--threads", type=int, help="CPU 추론 스레드 수")
+    parser.add_argument("--transcribe-only", action="store_true", help="화자분리 없이 전사 결과만 반환")
     parser.add_argument("--enable-align", action="store_true", help="외부 alignment 모델을 사용해 단어 타임스탬프를 보정")
     parser.add_argument("--offline-only", action="store_true", help="로컬 캐시 모델만 사용")
     return parser.parse_args()
@@ -115,6 +119,7 @@ def transcribe_audio(whisperx: Any, args: argparse.Namespace) -> dict[str, Any]:
         language=args.language,
         download_root=args.model_dir,
         local_files_only=args.offline_only,
+        threads=args.threads,
     )
     audio = whisperx.load_audio(args.audio)
     result = call_with_supported_kwargs(
@@ -307,6 +312,35 @@ def build_output(result: dict[str, Any], turns: list[DiarizedTurn]) -> dict[str,
     }
 
 
+def build_transcription_only_output(result: dict[str, Any]) -> dict[str, Any]:
+    """녹음 중 미리보기용으로 화자분리 없이 Whisper 구간만 앱 형식으로 변환한다."""
+
+    segments: list[dict[str, Any]] = []
+
+    for raw_segment in result.get("segments", []):
+        start = float(raw_segment.get("start", 0.0))
+        end = float(raw_segment.get("end", start))
+        append_segment(
+            segments,
+            PREVIEW_SPEAKER["id"],
+            start,
+            end,
+            str(raw_segment.get("text") or ""),
+            float(raw_segment.get("score") or 0.0),
+            None,
+        )
+
+    duration_ms = max((segment["endMs"] for segment in segments), default=0)
+
+    return {
+        "engineName": "whisperx-local-preview",
+        "language": result.get("language"),
+        "durationMs": duration_ms,
+        "speakers": [PREVIEW_SPEAKER],
+        "segments": segments,
+    }
+
+
 def main() -> int:
     """worker 전체 실행 흐름을 조율하고 마지막 stdout 라인에 JSON을 출력한다."""
 
@@ -316,6 +350,10 @@ def main() -> int:
     try:
         whisperx = import_engine_modules()
         result = transcribe_audio(whisperx, args)
+        if args.transcribe_only:
+            print(json.dumps(build_transcription_only_output(result), ensure_ascii=False))
+            return 0
+
         result = align_words(whisperx, result, args)
         turns = diarize_audio(result["_audio"], args)
         print(json.dumps(build_output(result, turns), ensure_ascii=False))

@@ -13,6 +13,9 @@ const execFileAsync = promisify(execFile);
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_STT_LANGUAGE = 'ko';
 const DEFAULT_STT_TASK = 'transcribe';
+// 미리보기 작업은 백그라운드에서 낮은 자원 사용량으로 실행한다.
+const DEFAULT_PREVIEW_BATCH_SIZE = '2';
+const DEFAULT_PREVIEW_THREAD_COUNT = '2';
 
 // WhisperX 기반 Python worker를 실행해 오프라인 전사/화자분리 결과를 만든다.
 export class LocalTranscriptionService {
@@ -40,6 +43,7 @@ export class LocalTranscriptionService {
     const workerPath = this.getWorkerPath();
     const timeout = Number(process.env.MEETING_RECORDER_STT_TIMEOUT_MS ?? DEFAULT_TIMEOUT_MS);
     const assetRoot = this.getEngineAssetRoot();
+    const isPreviewRequest = request.mode === 'preview';
     const args = [
       workerPath,
       '--audio',
@@ -60,6 +64,12 @@ export class LocalTranscriptionService {
       process.env.MEETING_RECORDER_STT_MODEL_DIR ?? path.join(assetRoot, 'whisper')
     ];
 
+    if (isPreviewRequest) {
+      args.push('--transcribe-only');
+    }
+
+    this.appendOptionalArg(args, '--batch-size', this.getBatchSize(isPreviewRequest));
+    this.appendOptionalArg(args, '--threads', this.getThreadCount(isPreviewRequest));
     this.appendOptionalArg(args, '--min-speakers', request.minSpeakers?.toString());
     this.appendOptionalArg(args, '--max-speakers', request.maxSpeakers?.toString());
 
@@ -196,6 +206,32 @@ export class LocalTranscriptionService {
     if (value) {
       args.push(key, value);
     }
+  }
+
+  // 미리보기 전사는 녹음 안정성을 위해 작은 배치로 돌리고, 최종 전사는 기본값을 유지한다.
+  private getBatchSize(isPreviewRequest: boolean): string | undefined {
+    if (isPreviewRequest) {
+      return (
+        process.env.MEETING_RECORDER_STT_PREVIEW_BATCH_SIZE ??
+        process.env.MEETING_RECORDER_STT_BATCH_SIZE ??
+        DEFAULT_PREVIEW_BATCH_SIZE
+      );
+    }
+
+    return process.env.MEETING_RECORDER_STT_BATCH_SIZE;
+  }
+
+  // 백그라운드 미리보기 작업이 CPU를 과점하지 않도록 추론 스레드 수를 낮춘다.
+  private getThreadCount(isPreviewRequest: boolean): string | undefined {
+    if (isPreviewRequest) {
+      return (
+        process.env.MEETING_RECORDER_STT_PREVIEW_THREADS ??
+        process.env.MEETING_RECORDER_STT_THREADS ??
+        DEFAULT_PREVIEW_THREAD_COUNT
+      );
+    }
+
+    return process.env.MEETING_RECORDER_STT_THREADS;
   }
 
   // 외부 STT 라이브러리 로그가 stdout에 섞여도 마지막 JSON 결과만 안정적으로 파싱한다.

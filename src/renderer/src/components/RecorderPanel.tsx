@@ -6,6 +6,7 @@ interface RecorderPanelProps {
   status: RecordingStatus;
   elapsedMs: number;
   error: string | null;
+  isLivePreviewing?: boolean;
   onStart(): void;
   onStop(): void;
 }
@@ -15,18 +16,20 @@ export function RecorderPanel({
   status,
   elapsedMs,
   error,
+  isLivePreviewing = false,
   onStart,
   onStop
 }: RecorderPanelProps): JSX.Element {
   const isRecording = status === 'recording';
   const isSaving = status === 'saving';
+  const statusLabel = isSaving ? '저장 중' : isLivePreviewing ? '전사 중' : isRecording ? '녹음 중' : '대기';
 
   return (
     <section className="recorderPanel">
       <div className="recordingMeter" aria-live="polite">
         <span className={isRecording ? 'recordDot active' : 'recordDot'} />
         <div>
-          <p className="eyebrow">{isRecording ? '녹음 중' : isSaving ? '저장 중' : '대기'}</p>
+          <p className="eyebrow">{statusLabel}</p>
           <strong>{formatDuration(elapsedMs)}</strong>
         </div>
       </div>

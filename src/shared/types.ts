@@ -59,10 +59,14 @@ export interface ExportTranscriptResult {
   filePath?: string;
 }
 
+// 최종 저장용 전사와 녹음 중 미리보기 전사를 구분한다.
+export type OfflineTranscriptionMode = 'final' | 'preview';
+
 export interface OfflineTranscriptionRequest {
   sessionId: string;
   audioData: Uint8Array;
   audioMimeType: string;
+  mode?: OfflineTranscriptionMode;
   minSpeakers?: number;
   maxSpeakers?: number;
 }
