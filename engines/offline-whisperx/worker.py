@@ -16,6 +16,9 @@ from typing import Any
 from diarization import (
     DEFAULT_DIARIZATION_MERGE_GAP_MS,
     DEFAULT_DIARIZATION_MIN_TURN_MS,
+    DEFAULT_DIARIZATION_OVERLAP_BRIDGE_GAP_MS,
+    DEFAULT_DIARIZATION_OVERLAP_MIN_TURN_MS,
+    DEFAULT_DIARIZATION_OVERLAP_PADDING_MS,
     DiarizedTurn,
     build_speakers,
     diarize_audio,
@@ -34,7 +37,7 @@ DEFAULT_TASK = "transcribe"
 DEFAULT_CLUSTER_THRESHOLD = 0.5
 SENTENCE_BOUNDARY_PATTERN = re.compile(r"[^.!?。！？…]+[.!?。！？…]*")
 SENTENCE_BOUNDARY_CHARS = ".!?。！？…"
-# 미리보기 전사는 아직 화자분리를 하지 않으므로 고정 화자로 표시한다.
+# 화자분리를 건너뛰거나 실패한 미리보기 fallback에서는 고정 화자로 표시한다.
 PREVIEW_SPEAKER = {"id": "speaker-preview", "name": "미리보기", "color": "#607d8b"}
 
 warnings.filterwarnings("ignore", message=r"\s*torchcodec is not installed correctly.*")
@@ -75,6 +78,24 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_DIARIZATION_MERGE_GAP_MS,
         help="같은 화자 턴을 합칠 최대 공백",
+    )
+    parser.add_argument(
+        "--diarization-overlap-min-turn-ms",
+        type=float,
+        default=DEFAULT_DIARIZATION_OVERLAP_MIN_TURN_MS,
+        help="동시 발화 후보로 보존할 최소 화자 턴 길이",
+    )
+    parser.add_argument(
+        "--diarization-overlap-bridge-gap-ms",
+        type=float,
+        default=DEFAULT_DIARIZATION_OVERLAP_BRIDGE_GAP_MS,
+        help="짧은 화자 전환을 동시 발화 후보로 묶을 최대 공백",
+    )
+    parser.add_argument(
+        "--diarization-overlap-padding-ms",
+        type=float,
+        default=DEFAULT_DIARIZATION_OVERLAP_PADDING_MS,
+        help="동시 발화 후보 경계에 더할 표시 여유 시간",
     )
     parser.add_argument("--batch-size", type=int, default=4, help="WhisperX 배치 크기")
     parser.add_argument("--threads", type=int, help="CPU 추론 스레드 수")
@@ -429,10 +450,10 @@ def build_segments(
     return segments
 
 
-def build_output(result: dict[str, Any], turns: list[DiarizedTurn]) -> dict[str, Any]:
+def build_output(result: dict[str, Any], turns: list[DiarizedTurn], args: argparse.Namespace | None = None) -> dict[str, Any]:
     """전사 결과, 화자 목록, 겹침 발화 표시를 최종 JSON으로 조립한다."""
 
-    overlaps = find_overlap_regions(turns)
+    overlaps = find_overlap_regions(turns, args)
     speakers, label_to_id = build_speakers(turns)
     segments = build_segments(result, turns, label_to_id, overlaps)
     duration_ms = max((segment["endMs"] for segment in segments), default=0)
@@ -494,7 +515,7 @@ def main() -> int:
         turns = diarize_audio(result["_audio"], args)
         emit_progress(args, "diarize", 90, "화자 분리 완료")
         emit_progress(args, "save", 96, "전사 결과를 정리하는 중")
-        print(json.dumps(build_output(result, turns), ensure_ascii=False))
+        print(json.dumps(build_output(result, turns, args), ensure_ascii=False))
         return 0
     except Exception as error:
         print(str(error), file=sys.stderr)

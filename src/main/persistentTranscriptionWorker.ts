@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   OfflineTranscriptionRequest,
   OfflineTranscriptionResult,
+  TranscriptionInferenceMode,
   TranscriptionProgressEvent,
   TranscriptionProgressStage
 } from '../shared/types';
@@ -22,8 +23,11 @@ export interface PersistentTranscriptionJob {
   audioPath: string;
   transcribeOnly: boolean;
   batchSize?: string;
+  finalDecoder?: TranscriptionInferenceMode;
   minSpeakers?: number;
   maxSpeakers?: number;
+  allowDiarizationFallback?: boolean;
+  standardDecoderForTranscribeOnly?: boolean;
 }
 
 interface PendingRequest {
@@ -74,8 +78,11 @@ export class PersistentTranscriptionWorker {
         mode: job.request.mode ?? 'final',
         transcribeOnly: job.transcribeOnly,
         batchSize: job.batchSize ? Number(job.batchSize) : undefined,
+        finalDecoder: job.finalDecoder,
         minSpeakers: job.minSpeakers,
         maxSpeakers: job.maxSpeakers,
+        allowDiarizationFallback: job.allowDiarizationFallback,
+        standardDecoderForTranscribeOnly: job.standardDecoderForTranscribeOnly,
         progress: Boolean(onProgress)
       };
 

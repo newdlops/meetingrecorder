@@ -2,11 +2,24 @@ import type { MeetingSession, SpeakerProfile } from '../../../shared/types';
 
 const SPEAKER_COLORS = ['#1f7a8c', '#b45f06', '#4f6f52', '#6d597a'];
 
+function buildSpeakerName(index: number): string {
+  const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+  let value = Math.max(0, index);
+  let label = '';
+
+  do {
+    label = `${alphabet[value % alphabet.length]}${label}`;
+    value = Math.floor(value / alphabet.length) - 1;
+  } while (value >= 0);
+
+  return `참석자 ${label}`;
+}
+
 // 새 회의 초안에 기본 화자 목록을 만든다.
 function createDefaultSpeakers(): SpeakerProfile[] {
   return SPEAKER_COLORS.slice(0, 3).map((color, index) => ({
     id: `speaker-${index + 1}`,
-    name: `화자 ${index + 1}`,
+    name: buildSpeakerName(index),
     color
   }));
 }

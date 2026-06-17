@@ -9,9 +9,13 @@ from typing import Any
 
 
 SPEAKER_COLORS = ["#1f7a8c", "#b45f06", "#4f6f52", "#6d597a", "#607d8b", "#8a5a44"]
+SPEAKER_NAME_PREFIX = "참석자"
 _DIARIZER_CACHE: dict[tuple[str, str, int, float], Any] = {}
 DEFAULT_DIARIZATION_MIN_TURN_MS = 650.0
 DEFAULT_DIARIZATION_MERGE_GAP_MS = 300.0
+DEFAULT_DIARIZATION_OVERLAP_MIN_TURN_MS = 180.0
+DEFAULT_DIARIZATION_OVERLAP_BRIDGE_GAP_MS = 220.0
+DEFAULT_DIARIZATION_OVERLAP_PADDING_MS = 160.0
 
 
 @dataclass(frozen=True)
@@ -98,6 +102,7 @@ def smooth_turns(turns: list[DiarizedTurn], args: argparse.Namespace) -> list[Di
         merge_gap,
     )
     min_duration = resolve_min_turn_seconds(args)
+    overlap_min_duration = resolve_overlap_min_turn_seconds(args)
 
     if min_duration <= 0 or len(normalized_turns) < 3:
         return normalized_turns
@@ -107,7 +112,14 @@ def smooth_turns(turns: list[DiarizedTurn], args: argparse.Namespace) -> list[Di
     for index, turn in enumerate(normalized_turns):
         previous_turn = smoothed_turns[-1] if smoothed_turns else None
         next_turn = normalized_turns[index + 1] if index + 1 < len(normalized_turns) else None
-        replacement_label = choose_replacement_label(turn, previous_turn, next_turn, min_duration, merge_gap)
+        replacement_label = choose_replacement_label(
+            turn,
+            previous_turn,
+            next_turn,
+            min_duration,
+            merge_gap,
+            overlap_min_duration,
+        )
         next_turn = DiarizedTurn(start=turn.start, end=turn.end, speaker_label=replacement_label)
 
         if smoothed_turns and smoothed_turns[-1].speaker_label == next_turn.speaker_label:
@@ -130,6 +142,7 @@ def choose_replacement_label(
     next_turn: DiarizedTurn | None,
     min_duration: float,
     merge_gap: float,
+    overlap_min_duration: float,
 ) -> str:
     """짧은 구간이 앞뒤의 같은 긴 화자 사이에 끼었거나 겹쳐 있으면 주변 화자로 흡수한다."""
 
@@ -150,6 +163,23 @@ def choose_replacement_label(
     previous_overlap = overlap_seconds(previous_turn, turn) if previous_turn else 0.0
     next_overlap = overlap_seconds(next_turn, turn) if next_turn else 0.0
     overlap_floor = max(0.05, duration * 0.5)
+    overlap_preserve_floor = max(0.08, duration * 0.35)
+
+    if (
+        previous_turn
+        and previous_turn.speaker_label != turn.speaker_label
+        and duration >= overlap_min_duration
+        and previous_overlap >= overlap_preserve_floor
+    ):
+        return turn.speaker_label
+
+    if (
+        next_turn
+        and next_turn.speaker_label != turn.speaker_label
+        and duration >= overlap_min_duration
+        and next_overlap >= overlap_preserve_floor
+    ):
+        return turn.speaker_label
 
     if previous_turn and previous_overlap >= overlap_floor and turn_duration(previous_turn) >= min_duration:
         return previous_turn.speaker_label
@@ -213,6 +243,33 @@ def resolve_merge_gap_seconds(args: argparse.Namespace) -> float:
     return max(0.0, float(getattr(args, "diarization_merge_gap_ms", DEFAULT_DIARIZATION_MERGE_GAP_MS)) / 1000)
 
 
+def resolve_overlap_min_turn_seconds(args: argparse.Namespace | None) -> float:
+    """동시 발화 후보로 보존할 최소 화자 턴 길이를 초 단위로 계산한다."""
+
+    return max(
+        0.0,
+        float(getattr(args, "diarization_overlap_min_turn_ms", DEFAULT_DIARIZATION_OVERLAP_MIN_TURN_MS)) / 1000,
+    )
+
+
+def resolve_overlap_bridge_gap_seconds(args: argparse.Namespace | None) -> float:
+    """겹침 대신 짧은 화자 전환으로 나온 구간을 동시 발화 후보로 묶는 최대 간격을 계산한다."""
+
+    return max(
+        0.0,
+        float(getattr(args, "diarization_overlap_bridge_gap_ms", DEFAULT_DIARIZATION_OVERLAP_BRIDGE_GAP_MS)) / 1000,
+    )
+
+
+def resolve_overlap_padding_seconds(args: argparse.Namespace | None) -> float:
+    """동시 발화 후보 경계 주변에 표시용 여유 시간을 더한다."""
+
+    return max(
+        0.0,
+        float(getattr(args, "diarization_overlap_padding_ms", DEFAULT_DIARIZATION_OVERLAP_PADDING_MS)) / 1000,
+    )
+
+
 def turn_duration(turn: DiarizedTurn) -> float:
     """화자 턴 길이를 초 단위로 반환한다."""
 
@@ -273,13 +330,17 @@ def resolve_diarization_model_paths(args: argparse.Namespace) -> tuple[Path, Pat
     return segmentation_model, embedding_model
 
 
-def find_overlap_regions(turns: list[DiarizedTurn]) -> list[OverlapRegion]:
-    """서로 다른 화자 발화가 시간상 겹치는 구간 목록을 만든다."""
+def find_overlap_regions(turns: list[DiarizedTurn], args: argparse.Namespace | None = None) -> list[OverlapRegion]:
+    """서로 다른 화자 발화가 겹치거나 거의 맞물리는 구간 목록을 만든다."""
 
     regions: list[OverlapRegion] = []
+    sorted_turns = sorted(turns, key=lambda turn: (turn.start, turn.end))
+    bridge_gap = resolve_overlap_bridge_gap_seconds(args)
+    padding = resolve_overlap_padding_seconds(args)
+    min_region = max(0.03, resolve_overlap_min_turn_seconds(args) * 0.5)
 
-    for left_index, left in enumerate(turns):
-        for right in turns[left_index + 1 :]:
+    for left_index, left in enumerate(sorted_turns):
+        for right in sorted_turns[left_index + 1 :]:
             if right.start >= left.end:
                 break
 
@@ -289,10 +350,37 @@ def find_overlap_regions(turns: list[DiarizedTurn]) -> list[OverlapRegion]:
             start = max(left.start, right.start)
             end = min(left.end, right.end)
 
-            if start < end:
-                regions.append(OverlapRegion(start=start, end=end, group_id=f"overlap-{len(regions) + 1}"))
+            if end - start >= min_region:
+                regions.append(create_overlap_region(start, end, len(regions) + 1))
+
+    for left, right in zip(sorted_turns, sorted_turns[1:]):
+        if left.speaker_label == right.speaker_label:
+            continue
+
+        gap = right.start - left.end
+
+        if gap < 0 or gap > bridge_gap:
+            continue
+
+        start = max(left.start, left.end - padding)
+        end = min(right.end, right.start + padding)
+
+        if end - start >= min_region and not overlaps_existing_region(start, end, regions):
+            regions.append(create_overlap_region(start, end, len(regions) + 1))
 
     return regions
+
+
+def create_overlap_region(start: float, end: float, index: int) -> OverlapRegion:
+    """동시 발화 표시 구간을 만든다."""
+
+    return OverlapRegion(start=start, end=end, group_id=f"overlap-{index}")
+
+
+def overlaps_existing_region(start: float, end: float, regions: list[OverlapRegion]) -> bool:
+    """이미 잡힌 동시 발화 구간과 겹치는지 확인한다."""
+
+    return any(start < region.end and end > region.start for region in regions)
 
 
 def build_speakers(turns: list[DiarizedTurn]) -> tuple[list[dict[str, str]], dict[str, str]]:
@@ -303,12 +391,29 @@ def build_speakers(turns: list[DiarizedTurn]) -> tuple[list[dict[str, str]], dic
     speakers = [
         {
             "id": label_to_id[label],
-            "name": f"화자 {index + 1}",
+            "name": build_speaker_name(index),
             "color": SPEAKER_COLORS[index % len(SPEAKER_COLORS)],
         }
         for index, label in enumerate(labels)
     ]
     return speakers, label_to_id
+
+
+def build_speaker_name(index: int) -> str:
+    """익명 화자에게 구분하기 쉬운 임의 이름을 붙인다."""
+
+    alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+    value = max(0, index)
+    label = ""
+
+    while True:
+        label = f"{alphabet[value % len(alphabet)]}{label}"
+        value = value // len(alphabet) - 1
+
+        if value < 0:
+            break
+
+    return f"{SPEAKER_NAME_PREFIX} {label}"
 
 
 def get_overlap_group(start: float, end: float, regions: list[OverlapRegion]) -> str | None:

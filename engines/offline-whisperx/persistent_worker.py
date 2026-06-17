@@ -16,6 +16,9 @@ from worker import (
     DEFAULT_CLUSTER_THRESHOLD,
     DEFAULT_DIARIZATION_MERGE_GAP_MS,
     DEFAULT_DIARIZATION_MIN_TURN_MS,
+    DEFAULT_DIARIZATION_OVERLAP_BRIDGE_GAP_MS,
+    DEFAULT_DIARIZATION_OVERLAP_MIN_TURN_MS,
+    DEFAULT_DIARIZATION_OVERLAP_PADDING_MS,
     DEFAULT_LANGUAGE,
     DEFAULT_TASK,
     build_asr_options,
@@ -64,6 +67,24 @@ def parse_args() -> argparse.Namespace:
         type=float,
         default=DEFAULT_DIARIZATION_MERGE_GAP_MS,
         help="같은 화자 턴을 합칠 최대 공백",
+    )
+    parser.add_argument(
+        "--diarization-overlap-min-turn-ms",
+        type=float,
+        default=DEFAULT_DIARIZATION_OVERLAP_MIN_TURN_MS,
+        help="동시 발화 후보로 보존할 최소 화자 턴 길이",
+    )
+    parser.add_argument(
+        "--diarization-overlap-bridge-gap-ms",
+        type=float,
+        default=DEFAULT_DIARIZATION_OVERLAP_BRIDGE_GAP_MS,
+        help="짧은 화자 전환을 동시 발화 후보로 묶을 최대 공백",
+    )
+    parser.add_argument(
+        "--diarization-overlap-padding-ms",
+        type=float,
+        default=DEFAULT_DIARIZATION_OVERLAP_PADDING_MS,
+        help="동시 발화 후보 경계에 더할 표시 여유 시간",
     )
     parser.add_argument("--threads", type=int, help="CPU 추론 스레드 수")
     parser.add_argument("--no-speech-threshold", type=float, default=0.5, help="무음으로 판단할 no-speech 확률 기준")
@@ -145,11 +166,17 @@ def build_request_args(base_args: argparse.Namespace, request: dict[str, Any]) -
     """요청 JSON과 초기 옵션을 합쳐 기존 전사/화자분리 함수가 쓰는 Namespace를 만든다."""
 
     next_args = argparse.Namespace(**vars(base_args))
+    final_decoder = request.get("finalDecoder")
+
+    if final_decoder in {"fast", "literal", "accurate", "contextual"}:
+        next_args.final_decoder = final_decoder
+
     next_args.audio = str(request["audioPath"])
     next_args.batch_size = int(request.get("batchSize") or 4)
     next_args.min_speakers = request.get("minSpeakers")
     next_args.max_speakers = request.get("maxSpeakers")
     next_args.transcribe_only = bool(request.get("transcribeOnly"))
+    next_args.standard_decoder_for_transcribe_only = bool(request.get("standardDecoderForTranscribeOnly"))
     next_args.progress = False
     return next_args
 
@@ -210,10 +237,20 @@ def process_request(whisperx: Any, model: Any, base_args: argparse.Namespace, re
 
         emit_progress(request_id, request, "align", 68, "단어 시간 보정을 건너뜀")
         emit_progress(request_id, request, "diarize", 72, "화자를 분리하는 중")
-        turns = diarize_audio(result["_audio"], request_args)
+        try:
+            turns = diarize_audio(result["_audio"], request_args)
+        except Exception:
+            if not request.get("allowDiarizationFallback"):
+                raise
+
+            emit_progress(request_id, request, "diarize", 90, "화자분리를 건너뛰고 전사 미리보기를 정리하는 중")
+            output = build_transcription_only_output(result)
+            emit({"type": "result", "id": request_id, "result": output})
+            return
+
         emit_progress(request_id, request, "diarize", 90, "화자 분리 완료")
         emit_progress(request_id, request, "save", 96, "전사 결과를 정리하는 중")
-        output = build_output(result, turns)
+        output = build_output(result, turns, request_args)
         emit({"type": "result", "id": request_id, "result": output})
     except Exception as error:
         emit({"type": "error", "id": request_id, "message": str(error)})

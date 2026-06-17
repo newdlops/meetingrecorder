@@ -119,6 +119,8 @@ export interface DeleteSessionResult {
 // 최종 저장용 전사와 녹음 중 미리보기 전사를 구분한다.
 export type OfflineTranscriptionMode = 'final' | 'preview';
 
+export type TranscriptionInferenceMode = 'literal' | 'contextual';
+
 export type TranscriptionProgressStage =
   | 'prepare'
   | 'model'
@@ -140,12 +142,15 @@ export interface OfflineTranscriptionRequest {
   mode?: OfflineTranscriptionMode;
   minSpeakers?: number;
   maxSpeakers?: number;
+  previewWorkerCount?: number;
+  transcriptionInferenceMode?: TranscriptionInferenceMode;
 }
 
 export interface SessionAudioTranscriptionRequest {
   sessionId: string;
   minSpeakers?: number;
   maxSpeakers?: number;
+  transcriptionInferenceMode?: TranscriptionInferenceMode;
 }
 
 export interface OfflineTranscriptionResult {

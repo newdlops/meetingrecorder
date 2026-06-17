@@ -1,4 +1,8 @@
-import type { OfflineTranscriptionMode, OfflineTranscriptionResult } from '../../../shared/types';
+import type {
+  OfflineTranscriptionMode,
+  OfflineTranscriptionResult,
+  TranscriptionInferenceMode
+} from '../../../shared/types';
 import type { RecordedAudio } from '../hooks/useRecorder';
 
 export interface OfflineTranscriptionPayload {
@@ -13,6 +17,8 @@ export interface TranscribeRecordedAudioOptions {
   includeAudioData?: boolean;
   minSpeakers?: number;
   maxSpeakers?: number;
+  previewWorkerCount?: number;
+  transcriptionInferenceMode?: TranscriptionInferenceMode;
 }
 
 // 녹음된 오디오를 메인 프로세스의 로컬 전사 엔진으로 보내고 결과를 받는다.
@@ -47,7 +53,9 @@ export async function transcribeRecordedAudio(
           : undefined,
       mode: options.mode ?? 'final',
       minSpeakers: options.minSpeakers,
-      maxSpeakers: options.maxSpeakers
+      maxSpeakers: options.maxSpeakers,
+      previewWorkerCount: options.previewWorkerCount,
+      transcriptionInferenceMode: options.transcriptionInferenceMode
     });
 
     return { audioData: shouldIncludeAudioData ? audioData : undefined, result };

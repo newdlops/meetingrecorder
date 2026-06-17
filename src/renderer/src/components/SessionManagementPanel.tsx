@@ -127,19 +127,22 @@ export function SessionManagementPanel({
 
           <div className="audioBlock">
             {audioUrl ? <audio controls src={audioUrl} /> : <p className="emptyText">녹음 파일 없음</p>}
-            <button className="ghostButton" disabled={!session.audioFileName} type="button" onClick={onExportAudio}>
-              <Download size={16} />
-              오디오 저장
-            </button>
-            <button
-              className="ghostButton"
-              disabled={disabled || !canReprocess}
-              type="button"
-              onClick={onReprocess}
-            >
-              <RefreshCw className={isReprocessing ? 'spin' : undefined} size={16} />
-              고품질 재처리
-            </button>
+            <div className="panelButtonGrid">
+              <button className="ghostButton" disabled={!session.audioFileName} type="button" onClick={onExportAudio}>
+                <Download size={16} />
+                오디오 저장
+              </button>
+              <button
+                className="ghostButton"
+                disabled={disabled || !canReprocess}
+                title="마지막 최고 품질 보정이 필요할 때만 사용"
+                type="button"
+                onClick={onReprocess}
+              >
+                <RefreshCw className={isReprocessing ? 'spin' : undefined} size={16} />
+                최종 고품질 보정
+              </button>
+            </div>
           </div>
 
           <label className="fieldBlock">
@@ -163,7 +166,7 @@ export function SessionManagementPanel({
             <textarea disabled={disabled} rows={5} value={memo} onChange={(event) => setMemo(event.target.value)} />
           </label>
 
-          <div className="managementActions">
+          <div className="managementActions panelButtonGrid">
             <button className="primaryButton" disabled={disabled || !hasChanges} type="button" onClick={saveDetails}>
               <Save size={16} />
               저장

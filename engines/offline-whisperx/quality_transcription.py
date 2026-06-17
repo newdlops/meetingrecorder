@@ -55,9 +55,15 @@ def add_quality_args(parser: argparse.ArgumentParser) -> None:
 
 
 def should_use_standard_decoder(args: argparse.Namespace) -> bool:
-    """미리보기는 빠른 경로를 유지하고 최종 저장 전사에만 표준 디코더를 적용한다."""
+    """표준 디코더가 필요한 요청인지 확인한다."""
 
-    return args.final_decoder != "fast" and not getattr(args, "transcribe_only", False)
+    if args.final_decoder == "fast":
+        return False
+
+    if getattr(args, "transcribe_only", False):
+        return bool(getattr(args, "standard_decoder_for_transcribe_only", False))
+
+    return True
 
 
 def is_contextual_decoder(args: argparse.Namespace) -> bool:

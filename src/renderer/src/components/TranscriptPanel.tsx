@@ -1,5 +1,5 @@
-import { Download, Loader2, MessageSquareText, Pause, Play } from 'lucide-react';
-import type { CSSProperties } from 'react';
+import { Download, Loader2, MessageSquareText, Pause, Play, StickyNote } from 'lucide-react';
+import { useState, type CSSProperties } from 'react';
 import type { MeetingSession, TranscriptSegment, TranscriptionProgressEvent } from '../../../shared/types';
 import { formatDuration } from '../utils/time';
 
@@ -7,6 +7,7 @@ interface TranscriptPanelProps {
   session: MeetingSession | null;
   isRecording?: boolean;
   isLivePreviewing?: boolean;
+  showLivePreviewStatus?: boolean;
   isRealtimeTranscriptionEnabled?: boolean;
   canPlaySegments?: boolean;
   memoDisabled?: boolean;
@@ -26,6 +27,7 @@ export function TranscriptPanel({
   session,
   isRecording = false,
   isLivePreviewing = false,
+  showLivePreviewStatus = false,
   isRealtimeTranscriptionEnabled = false,
   canPlaySegments = false,
   memoDisabled = false,
@@ -41,6 +43,7 @@ export function TranscriptPanel({
 }: TranscriptPanelProps): JSX.Element {
   const speakerMap = new Map(session?.speakers.map((speaker) => [speaker.id, speaker]) ?? []);
   const previewMessage = previewProgress?.message ?? (isLivePreviewing ? '전사 미리보기 생성 중' : '음성 감지 대기');
+  const shouldShowLivePreviewStatus = isRealtimeTranscriptionEnabled && (showLivePreviewStatus || isLivePreviewing);
 
   return (
     <section className="transcriptPanel">
@@ -57,7 +60,7 @@ export function TranscriptPanel({
         ) : null}
       </div>
 
-      {isRecording && isRealtimeTranscriptionEnabled ? (
+      {shouldShowLivePreviewStatus ? (
         <div className="livePreviewStatus">
           <div className="livePreviewSummary">
             {isLivePreviewing ? <Loader2 className="spin" size={16} /> : <MessageSquareText size={16} />}
@@ -91,49 +94,129 @@ export function TranscriptPanel({
         <div className="transcriptList">
           {session.segments.map((segment) => {
             const speaker = speakerMap.get(segment.speakerId);
-            const style = { '--speaker-color': speaker?.color ?? '#607d8b' } as CSSProperties;
-            const isPlaying = playingSegmentId === segment.id;
-            const shouldAnimateSyllables = isRecording && isRealtimeTranscriptionEnabled;
 
             return (
-              <article
-                className={shouldAnimateSyllables ? 'transcriptSegment realtimeSegment' : 'transcriptSegment'}
+              <TranscriptSegmentCard
+                canPlaySegments={canPlaySegments}
+                isPlaying={playingSegmentId === segment.id}
+                isRealtimeTranscriptionEnabled={isRealtimeTranscriptionEnabled}
+                isRecording={isRecording}
                 key={segment.id}
-                style={style}
-              >
-                <div className="segmentHeader">
-                  <strong>{speaker?.name ?? '알 수 없는 화자'}</strong>
-                  <span>
-                    {formatDuration(segment.startMs)} - {formatDuration(segment.endMs)}
-                  </span>
-                  {segment.isOverlapped ? <em>동시 발화</em> : null}
-                  <button
-                    aria-label={isPlaying ? '문장 재생 중지' : '문장 재생'}
-                    className={isPlaying ? 'segmentPlayButton active' : 'segmentPlayButton'}
-                    disabled={!canPlaySegments || !onPlaySegment}
-                    title={isPlaying ? '문장 재생 중지' : '문장 재생'}
-                    type="button"
-                    onClick={() => onPlaySegment?.(segment)}
-                  >
-                    {isPlaying ? <Pause size={15} /> : <Play size={15} />}
-                  </button>
-                </div>
-                {shouldAnimateSyllables ? <SyllableText text={segment.text} /> : <p>{segment.text}</p>}
-                <textarea
-                  aria-label="문장 메모"
-                  className="segmentMemoInput"
-                  defaultValue={segment.memo ?? ''}
-                  disabled={memoDisabled || !onSegmentMemoChange}
-                  placeholder="메모"
-                  rows={2}
-                  onBlur={(event) => onSegmentMemoChange?.(segment.id, event.target.value)}
-                />
-              </article>
+                memoDisabled={memoDisabled || !onSegmentMemoChange}
+                segment={segment}
+                speakerColor={speaker?.color ?? '#607d8b'}
+                speakerName={speaker?.name ?? '알 수 없는 화자'}
+                onMemoChange={(memo) => onSegmentMemoChange?.(segment.id, memo)}
+                onPlaySegment={onPlaySegment}
+              />
             );
           })}
         </div>
       )}
     </section>
+  );
+}
+
+function TranscriptSegmentCard({
+  canPlaySegments,
+  isPlaying,
+  isRealtimeTranscriptionEnabled,
+  isRecording,
+  memoDisabled,
+  segment,
+  speakerColor,
+  speakerName,
+  onMemoChange,
+  onPlaySegment
+}: {
+  canPlaySegments: boolean;
+  isPlaying: boolean;
+  isRealtimeTranscriptionEnabled: boolean;
+  isRecording: boolean;
+  memoDisabled: boolean;
+  segment: TranscriptSegment;
+  speakerColor: string;
+  speakerName: string;
+  onMemoChange(memo: string): void;
+  onPlaySegment?: (segment: TranscriptSegment) => void;
+}): JSX.Element {
+  const [isMemoEditing, setIsMemoEditing] = useState(false);
+  const hasMemo = (segment.memo ?? '').trim().length > 0;
+  const shouldAnimateSyllables = isRecording && isRealtimeTranscriptionEnabled;
+  const style = { '--speaker-color': speakerColor } as CSSProperties;
+
+  return (
+    <article
+      className={shouldAnimateSyllables ? 'transcriptSegment realtimeSegment' : 'transcriptSegment'}
+      style={style}
+    >
+      <div className="segmentHeader">
+        <strong>{speakerName}</strong>
+        <span>
+          {formatDuration(segment.startMs)} - {formatDuration(segment.endMs)}
+        </span>
+        {segment.isOverlapped ? <em>동시 발화</em> : null}
+        <div className="segmentHeaderActions">
+          <button
+            aria-label={hasMemo ? '문장 메모 수정' : '문장 메모 추가'}
+            className={hasMemo ? 'segmentMemoHeaderButton active' : 'segmentMemoHeaderButton'}
+            disabled={memoDisabled}
+            title={hasMemo ? segment.memo?.trim() : '메모'}
+            type="button"
+            onClick={() => setIsMemoEditing(true)}
+          >
+            <StickyNote size={14} />
+            {hasMemo ? <span>{segment.memo?.trim()}</span> : null}
+          </button>
+          <button
+            aria-label={isPlaying ? '문장 재생 중지' : '문장 재생'}
+            className={isPlaying ? 'segmentPlayButton active' : 'segmentPlayButton'}
+            disabled={!canPlaySegments || !onPlaySegment}
+            title={isPlaying ? '문장 재생 중지' : '문장 재생'}
+            type="button"
+            onClick={() => onPlaySegment?.(segment)}
+          >
+            {isPlaying ? <Pause size={15} /> : <Play size={15} />}
+          </button>
+        </div>
+      </div>
+      {shouldAnimateSyllables ? <SyllableText text={segment.text} /> : <p>{segment.text}</p>}
+      {isMemoEditing ? (
+        <SegmentMemoEditor
+          disabled={memoDisabled}
+          memo={segment.memo ?? ''}
+          onChange={(memo) => {
+            onMemoChange(memo);
+            setIsMemoEditing(false);
+          }}
+        />
+      ) : null}
+    </article>
+  );
+}
+
+function SegmentMemoEditor({
+  disabled,
+  memo,
+  onChange
+}: {
+  disabled: boolean;
+  memo: string;
+  onChange(memo: string): void;
+}): JSX.Element {
+  return (
+    <textarea
+      autoFocus
+      aria-label="문장 메모"
+      className="segmentMemoInput"
+      defaultValue={memo}
+      disabled={disabled}
+      placeholder="메모"
+      rows={2}
+      onBlur={(event) => {
+        onChange(event.target.value);
+      }}
+    />
   );
 }
 

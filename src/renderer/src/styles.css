@@ -161,9 +161,10 @@ textarea:disabled {
   display: flex;
   flex-direction: column;
   gap: 20px;
+  height: 100vh;
   min-width: 0;
   min-height: 0;
-  overflow: auto;
+  overflow: hidden;
   padding: 28px;
 }
 
@@ -307,10 +308,19 @@ textarea:disabled {
   align-items: center;
   justify-content: center;
   gap: 8px;
+  min-width: 0;
   min-height: 40px;
   padding: 0 14px;
   border-radius: 8px;
   font-weight: 700;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.primaryButton svg,
+.dangerButton svg,
+.ghostButton svg {
+  flex: 0 0 auto;
 }
 
 .primaryButton {
@@ -382,9 +392,11 @@ textarea:disabled {
 
 .contentGrid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
+  flex: 1;
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 340px);
   gap: 20px;
   min-height: 0;
+  overflow: hidden;
 }
 
 .reviewPanel {
@@ -478,7 +490,8 @@ textarea:disabled {
 
 .transcriptPanel,
 .speakerPanel,
-.managementPanel {
+.managementPanel,
+.processingSettingsPanel {
   min-height: 0;
   padding: 20px;
   background: #ffffff;
@@ -489,12 +502,36 @@ textarea:disabled {
 .transcriptPanel {
   display: flex;
   flex-direction: column;
-  height: calc(100vh - 166px);
+  height: 100%;
+}
+
+.sideStack {
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  width: 100%;
+  max-height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .speakerPanel,
-.managementPanel {
-  height: fit-content;
+.managementPanel,
+.processingSettingsPanel {
+  flex: 0 0 auto;
+  width: 100%;
+  max-width: 100%;
+  height: auto;
+  overflow-wrap: break-word;
+}
+
+.speakerPanel {
+  display: flex;
+  flex-direction: column;
+  max-height: min(420px, 46vh);
 }
 
 .managementForm,
@@ -503,6 +540,7 @@ textarea:disabled {
   display: flex;
   flex-direction: column;
   gap: 10px;
+  min-width: 0;
 }
 
 .managementForm {
@@ -522,6 +560,7 @@ textarea:disabled {
 .fieldBlock textarea {
   width: 100%;
   min-width: 0;
+  max-width: 100%;
   padding: 10px 11px;
   color: #243133;
   background: #f8fbfb;
@@ -535,11 +574,110 @@ textarea:disabled {
 
 .audioBlock audio {
   width: 100%;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .managementActions {
-  display: flex;
+  margin-top: 2px;
+}
+
+.panelButtonGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.panelButtonGrid button {
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  min-height: 38px;
+  padding: 6px 8px;
+  white-space: normal;
+}
+
+.sideStack .primaryButton,
+.sideStack .dangerButton,
+.sideStack .ghostButton {
+  gap: 6px;
+  min-height: 38px;
+  padding-right: 10px;
+  padding-left: 10px;
+  font-size: 13px;
+}
+
+.workerCountControl,
+.inferenceModeControl {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.workerCountControl span,
+.inferenceModeControl span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #526265;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.workerCountInputs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 68px;
+  gap: 10px;
+  align-items: center;
+}
+
+.workerCountInputs input[type='range'] {
+  width: 100%;
+}
+
+.workerCountInputs input[type='number'] {
+  width: 68px;
+  min-height: 34px;
+  padding: 0 8px;
+  color: #243133;
+  text-align: center;
+  background: #f8fbfb;
+  border: 1px solid #cedbdd;
+  border-radius: 8px;
+}
+
+.inferenceModeControl {
+  margin-top: 16px;
+}
+
+.inferenceModeOptions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  align-items: stretch;
+}
+
+.inferenceModeOptions button {
+  min-height: 38px;
+  min-width: 0;
+  padding: 5px 8px;
+  color: #526265;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.2;
+  background: #f8fbfb;
+  border: 1px solid #cedbdd;
+  border-radius: 8px;
+  white-space: normal;
+  height: 100%;
+}
+
+.inferenceModeOptions button.active {
+  color: #ffffff;
+  background: #1f7a8c;
+  border-color: #1f7a8c;
 }
 
 .progressBlock {
@@ -574,6 +712,10 @@ textarea:disabled {
 
 .progressTrack {
   margin-top: 9px;
+}
+
+.workerProgressTrack {
+  height: 5px;
 }
 
 .progressTrack span,
@@ -614,8 +756,9 @@ textarea:disabled {
 
 .transcriptList {
   display: flex;
+  flex: 1;
   flex-direction: column;
-  gap: 12px;
+  gap: 7px;
   min-height: 0;
   overflow: auto;
   padding-right: 4px;
@@ -624,9 +767,9 @@ textarea:disabled {
 .livePreviewStatus {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 7px;
   margin-bottom: 14px;
-  padding: 10px 12px;
+  padding: 8px 10px;
   color: #526265;
   font-size: 13px;
   background: #f7faf9;
@@ -650,17 +793,17 @@ textarea:disabled {
 
 .workerStatusGrid {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  grid-template-columns: repeat(auto-fit, minmax(116px, 1fr));
+  gap: 6px;
   width: 100%;
 }
 
 .workerStatus {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
   min-width: 0;
-  padding: 9px;
+  padding: 6px 7px;
   background: #ffffff;
   border: 1px solid #d9e2e4;
   border-radius: 8px;
@@ -671,7 +814,7 @@ textarea:disabled {
   gap: 8px;
   align-items: center;
   justify-content: space-between;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .workerStatusHeader strong,
@@ -684,12 +827,12 @@ textarea:disabled {
 .workerStatus p {
   margin: 0;
   color: #627174;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .transcriptSegment {
-  padding: 14px 14px 14px 16px;
-  border-left: 4px solid var(--speaker-color);
+  padding: 9px 10px 9px 12px;
+  border-left: 3px solid var(--speaker-color);
   border-radius: 8px;
   background: #f7faf9;
 }
@@ -697,10 +840,18 @@ textarea:disabled {
 .segmentHeader {
   display: flex;
   align-items: center;
-  gap: 10px;
-  margin-bottom: 7px;
+  gap: 8px;
+  margin-bottom: 4px;
   color: #536164;
-  font-size: 13px;
+  font-size: 12px;
+}
+
+.segmentHeaderActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  margin-left: auto;
 }
 
 .segmentHeader strong {
@@ -708,7 +859,7 @@ textarea:disabled {
 }
 
 .segmentHeader em {
-  padding: 2px 7px;
+  padding: 1px 6px;
   color: #825400;
   font-style: normal;
   font-weight: 700;
@@ -716,18 +867,46 @@ textarea:disabled {
   border-radius: 999px;
 }
 
+.segmentMemoHeaderButton,
 .segmentPlayButton {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 30px;
-  height: 30px;
-  margin-left: auto;
+  min-width: 26px;
+  height: 26px;
   padding: 0;
   color: #1f7a8c;
   background: #ffffff;
   border: 1px solid #c9d8db;
   border-radius: 8px;
+}
+
+.segmentMemoHeaderButton {
+  gap: 4px;
+  max-width: 150px;
+  padding: 0 7px;
+}
+
+.segmentMemoHeaderButton:not(.active) {
+  width: 26px;
+  padding: 0;
+}
+
+.segmentMemoHeaderButton.active {
+  color: #ffffff;
+  background: #3b6f5c;
+  border-color: #3b6f5c;
+}
+
+.segmentMemoHeaderButton span {
+  overflow: hidden;
+  min-width: 0;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.segmentPlayButton {
+  width: 26px;
 }
 
 .segmentPlayButton.active {
@@ -738,14 +917,15 @@ textarea:disabled {
 
 .transcriptSegment p {
   color: #263234;
-  line-height: 1.55;
+  font-size: 14px;
+  line-height: 1.42;
 }
 
 .segmentMemoInput {
   width: 100%;
-  min-height: 64px;
-  margin-top: 10px;
-  padding: 9px 10px;
+  min-height: 48px;
+  margin-top: 6px;
+  padding: 7px 8px;
   resize: vertical;
   color: #263234;
   background: #ffffff;
@@ -771,8 +951,12 @@ textarea:disabled {
 
 .speakerList {
   display: flex;
+  flex: 1 1 auto;
   flex-direction: column;
   gap: 10px;
+  min-height: 0;
+  overflow: auto;
+  padding-right: 4px;
 }
 
 .speakerRow {
@@ -780,6 +964,7 @@ textarea:disabled {
   grid-template-columns: 16px minmax(0, 1fr);
   gap: 10px;
   align-items: center;
+  min-width: 0;
 }
 
 .speakerSwatch {
@@ -791,7 +976,7 @@ textarea:disabled {
 .speakerRow input {
   width: 100%;
   min-width: 0;
-  padding: 10px 11px;
+  padding: 8px 10px;
   color: #243133;
   background: #f8fbfb;
   border: 1px solid #cedbdd;
@@ -851,9 +1036,24 @@ textarea:disabled {
     grid-template-columns: 1fr;
   }
 
+  .workspace {
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
+  }
+
+  .contentGrid,
+  .sideStack {
+    overflow: visible;
+  }
+
   .transcriptPanel {
     height: auto;
     min-height: 360px;
+  }
+
+  .speakerPanel {
+    max-height: 300px;
   }
 
   .recorderActions {

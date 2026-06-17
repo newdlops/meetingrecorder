@@ -192,7 +192,7 @@ export class MeetingSessionStore {
     const session = await this.readSession(sessionId);
 
     if (!session?.audioFileName) {
-      throw new Error('재처리할 녹음 파일이 없습니다.');
+      throw new Error('최종 보정할 녹음 파일이 없습니다.');
     }
 
     return {

@@ -6,10 +6,12 @@ import type {
   SessionDetailsUpdateRequest,
   SpeakerProfile,
   TranscriptSegment,
+  TranscriptionInferenceMode,
   TranscriptionProgressEvent
 } from '../../shared/types';
 import { buildTranscriptText } from '../../shared/transcriptFormatter';
 import { RecorderPanel } from './components/RecorderPanel';
+import { ProcessingSettingsPanel } from './components/ProcessingSettingsPanel';
 import { SessionList } from './components/SessionList';
 import { SessionManagementPanel } from './components/SessionManagementPanel';
 import { SpeakerEditor } from './components/SpeakerEditor';
@@ -27,8 +29,14 @@ import { transcribeRecordedAudio } from './services/offlineTranscription';
 const LIVE_PREVIEW_INITIAL_DELAY_MS = 1_000;
 const LIVE_PREVIEW_INTERVAL_MS = 1_000;
 const LIVE_PREVIEW_STOP_DRAIN_POLL_MS = 250;
-const LIVE_PREVIEW_MAX_PARALLEL = 2;
+const DEFAULT_PREVIEW_WORKER_COUNT = 2;
+const MIN_PREVIEW_WORKER_COUNT = 1;
+const MAX_PREVIEW_WORKER_COUNT = 8;
 const PREVIEW_SEGMENT_ID_PREFIX = 'preview';
+const PREVIEW_WORKER_COUNT_STORAGE_KEY = 'meetingRecorder.previewWorkerCount';
+const DEFAULT_TRANSCRIPTION_INFERENCE_MODE: TranscriptionInferenceMode = 'literal';
+const FINAL_REPROCESS_INFERENCE_MODE: TranscriptionInferenceMode = 'contextual';
+const TRANSCRIPTION_INFERENCE_MODE_STORAGE_KEY = 'meetingRecorder.transcriptionInferenceMode';
 
 interface LivePreviewQueueItem {
   snapshot: RecordedAudio;
@@ -210,6 +218,56 @@ function createIdlePreviewWorkerProgress(sessionId: string, workerIndex: number)
   };
 }
 
+function normalizePreviewWorkerCount(value: number): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_PREVIEW_WORKER_COUNT;
+  }
+
+  return Math.max(MIN_PREVIEW_WORKER_COUNT, Math.min(MAX_PREVIEW_WORKER_COUNT, Math.round(value)));
+}
+
+function readStoredPreviewWorkerCount(): number {
+  try {
+    const rawValue = window.localStorage.getItem(PREVIEW_WORKER_COUNT_STORAGE_KEY);
+
+    if (rawValue === null) {
+      return DEFAULT_PREVIEW_WORKER_COUNT;
+    }
+
+    return normalizePreviewWorkerCount(Number(rawValue));
+  } catch {
+    return DEFAULT_PREVIEW_WORKER_COUNT;
+  }
+}
+
+function writeStoredPreviewWorkerCount(value: number): void {
+  try {
+    window.localStorage.setItem(PREVIEW_WORKER_COUNT_STORAGE_KEY, String(normalizePreviewWorkerCount(value)));
+  } catch {
+    // 설정 저장 실패는 녹음/전사 동작을 막지 않는다.
+  }
+}
+
+function normalizeTranscriptionInferenceMode(value: unknown): TranscriptionInferenceMode {
+  return value === 'contextual' || value === 'literal' ? value : DEFAULT_TRANSCRIPTION_INFERENCE_MODE;
+}
+
+function readStoredTranscriptionInferenceMode(): TranscriptionInferenceMode {
+  try {
+    return normalizeTranscriptionInferenceMode(window.localStorage.getItem(TRANSCRIPTION_INFERENCE_MODE_STORAGE_KEY));
+  } catch {
+    return DEFAULT_TRANSCRIPTION_INFERENCE_MODE;
+  }
+}
+
+function writeStoredTranscriptionInferenceMode(value: TranscriptionInferenceMode): void {
+  try {
+    window.localStorage.setItem(TRANSCRIPTION_INFERENCE_MODE_STORAGE_KEY, normalizeTranscriptionInferenceMode(value));
+  } catch {
+    // 설정 저장 실패는 녹음/전사 동작을 막지 않는다.
+  }
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
@@ -237,6 +295,7 @@ export function App(): JSX.Element {
   const livePreviewSnapshotInFlightCountRef = useRef(0);
   const livePreviewLastQueuedEndRef = useRef(0);
   const livePreviewAcceptingSnapshotsRef = useRef(false);
+  const livePreviewDrainAfterStopRef = useRef(false);
   const livePreviewProgressEnabledRef = useRef(false);
   const livePreviewQueueRef = useRef<LivePreviewQueueItem[]>([]);
   const stopRecordingPromptResolveRef = useRef<((choice: StopRecordingChoice) => void) | null>(null);
@@ -245,6 +304,7 @@ export function App(): JSX.Element {
   const [sessions, setSessions] = useState<MeetingSessionSummary[]>([]);
   const [selectedSession, setSelectedSession] = useState<MeetingSession | null>(null);
   const [draftSession, setDraftSession] = useState<MeetingSession | null>(null);
+  const [stopRequestedElapsedMs, setStopRequestedElapsedMs] = useState<number | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [isReprocessing, setIsReprocessing] = useState(false);
   const [isStoppingAfterLivePreviewDrain, setIsStoppingAfterLivePreviewDrain] = useState(false);
@@ -254,7 +314,9 @@ export function App(): JSX.Element {
     captureDistantSpeech: true,
     inputSource: 'microphone',
     liveTranscriptionEnabled: false,
-    expectedSpeakerCount: 0
+    expectedSpeakerCount: 0,
+    previewWorkerCount: readStoredPreviewWorkerCount(),
+    transcriptionInferenceMode: readStoredTranscriptionInferenceMode()
   });
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [playingSegmentId, setPlayingSegmentId] = useState<string | null>(null);
@@ -262,7 +324,7 @@ export function App(): JSX.Element {
   const [livePreviewQueueStats, setLivePreviewQueueStats] = useState<LivePreviewQueueStats>({
     pendingCount: 0,
     activeCount: 0,
-    maxParallel: LIVE_PREVIEW_MAX_PARALLEL
+    maxParallel: DEFAULT_PREVIEW_WORKER_COUNT
   });
   const [livePreviewWorkerProgress, setLivePreviewWorkerProgress] = useState<Record<string, TranscriptionProgressEvent>>(
     {}
@@ -275,7 +337,9 @@ export function App(): JSX.Element {
   const activeSession = draftSession ?? selectedSession;
   const isBusy = isSaving || isReprocessing || isStoppingAfterLivePreviewDrain;
   const visibleStatus: RecordingStatus = isBusy ? 'saving' : recordingStatus;
-  const previewWorkerProgressList = Array.from({ length: LIVE_PREVIEW_MAX_PARALLEL }, (_unused, index) => {
+  const previewWorkerCount = normalizePreviewWorkerCount(recorderSettings.previewWorkerCount);
+  const transcriptionInferenceMode = normalizeTranscriptionInferenceMode(recorderSettings.transcriptionInferenceMode);
+  const previewWorkerProgressList = Array.from({ length: previewWorkerCount }, (_unused, index) => {
     const workerId = `preview-${index + 1}`;
     return livePreviewWorkerProgress[workerId] ?? createIdlePreviewWorkerProgress(activeSession?.id ?? '', index);
   });
@@ -284,9 +348,13 @@ export function App(): JSX.Element {
     setLivePreviewQueueStats({
       pendingCount: livePreviewQueueRef.current.length,
       activeCount: livePreviewInFlightCountRef.current,
-      maxParallel: LIVE_PREVIEW_MAX_PARALLEL
+      maxParallel: previewWorkerCount
     });
-  }, []);
+  }, [previewWorkerCount]);
+
+  useEffect(() => {
+    syncLivePreviewQueueStats();
+  }, [syncLivePreviewQueueStats]);
 
   const getLivePreviewWorkStats = useCallback(
     (): LivePreviewWorkStats => ({
@@ -316,6 +384,7 @@ export function App(): JSX.Element {
 
   const discardLivePreviewWork = useCallback(() => {
     livePreviewAcceptingSnapshotsRef.current = false;
+    livePreviewDrainAfterStopRef.current = false;
     livePreviewProgressEnabledRef.current = false;
     livePreviewRunIdRef.current += 1;
     livePreviewQueueRef.current = [];
@@ -327,6 +396,13 @@ export function App(): JSX.Element {
     setIsLivePreviewing(false);
     setLivePreviewProgress(null);
   }, [syncLivePreviewQueueStats]);
+
+  const isLivePreviewRunUsable = useCallback((runId: number): boolean => {
+    return (
+      livePreviewRunIdRef.current === runId &&
+      (recordingStatusRef.current === 'recording' || livePreviewDrainAfterStopRef.current)
+    );
+  }, []);
 
   useEffect(() => {
     draftSessionRef.current = draftSession;
@@ -450,24 +526,33 @@ export function App(): JSX.Element {
       });
 
       try {
+        const expectedSpeakerCount = recorderSettings.expectedSpeakerCount;
+        const speakerOptions =
+          expectedSpeakerCount > 0
+            ? {
+                minSpeakers: expectedSpeakerCount,
+                maxSpeakers: expectedSpeakerCount
+              }
+            : {};
         const payload = await transcribeRecordedAudio(sessionId, queuedPreview.snapshot, {
           mode: 'preview',
-          includeAudioData: false
+          includeAudioData: false,
+          previewWorkerCount,
+          transcriptionInferenceMode,
+          ...speakerOptions
         });
         const previewResult = payload.result;
 
         if (
           payload.error &&
-          livePreviewRunIdRef.current === runId &&
-          recordingStatusRef.current === 'recording'
+          isLivePreviewRunUsable(runId)
         ) {
           setAppError(`실시간 전사에 실패했습니다.\n${payload.error}`);
         }
 
         if (
           !previewResult ||
-          livePreviewRunIdRef.current !== runId ||
-          recordingStatusRef.current !== 'recording'
+          !isLivePreviewRunUsable(runId)
         ) {
           return;
         }
@@ -518,16 +603,21 @@ export function App(): JSX.Element {
         }
       }
     },
-    [syncLivePreviewQueueStats]
+    [
+      isLivePreviewRunUsable,
+      previewWorkerCount,
+      recorderSettings.expectedSpeakerCount,
+      syncLivePreviewQueueStats,
+      transcriptionInferenceMode
+    ]
   );
 
   const drainLivePreviewQueue = useCallback(
     (sessionId: string, runId: number) => {
       while (
-        livePreviewInFlightCountRef.current < LIVE_PREVIEW_MAX_PARALLEL &&
+        livePreviewInFlightCountRef.current < previewWorkerCount &&
         livePreviewQueueRef.current.length > 0 &&
-        livePreviewRunIdRef.current === runId &&
-        recordingStatusRef.current === 'recording'
+        isLivePreviewRunUsable(runId)
       ) {
         const queuedPreview = livePreviewQueueRef.current.shift();
 
@@ -540,12 +630,12 @@ export function App(): JSX.Element {
         void processLivePreviewQueueItem(sessionId, runId, queuedPreview);
       }
     },
-    [processLivePreviewQueueItem, syncLivePreviewQueueStats]
+    [isLivePreviewRunUsable, previewWorkerCount, processLivePreviewQueueItem, syncLivePreviewQueueStats]
   );
 
   const waitForLivePreviewWorkToSettle = useCallback(
     async (sessionId: string, runId: number) => {
-      while (livePreviewRunIdRef.current === runId && recordingStatusRef.current === 'recording') {
+      while (isLivePreviewRunUsable(runId)) {
         drainLivePreviewQueue(sessionId, runId);
 
         const stats = getLivePreviewWorkStats();
@@ -560,12 +650,12 @@ export function App(): JSX.Element {
           mode: 'preview',
           stage: 'transcribe',
           progress: 0,
-          message: `남은 실시간 전사 처리 중 · 대기 ${stats.pendingCount}개 · 처리 ${stats.activeCount}/${LIVE_PREVIEW_MAX_PARALLEL}`
+          message: `남은 실시간 전사 처리 중 · 대기 ${stats.pendingCount}개 · 처리 ${stats.activeCount}/${previewWorkerCount}`
         });
         await delay(LIVE_PREVIEW_STOP_DRAIN_POLL_MS);
       }
     },
-    [drainLivePreviewQueue, getLivePreviewWorkStats, hasLivePreviewWork]
+    [drainLivePreviewQueue, getLivePreviewWorkStats, hasLivePreviewWork, isLivePreviewRunUsable, previewWorkerCount]
   );
 
   // 녹음 파일의 시간 marker만 큐에 넣고, 메인 프로세스가 해당 구간을 잘라 전사한다.
@@ -583,6 +673,7 @@ export function App(): JSX.Element {
 
           if (
             snapshot &&
+            livePreviewAcceptingSnapshotsRef.current &&
             livePreviewRunIdRef.current === runId &&
             recordingStatusRef.current === 'recording'
           ) {
@@ -638,6 +729,12 @@ export function App(): JSX.Element {
       window.clearTimeout(initialTimerId);
       window.clearInterval(intervalTimerId);
       livePreviewAcceptingSnapshotsRef.current = false;
+
+      if (livePreviewDrainAfterStopRef.current) {
+        syncLivePreviewQueueStats();
+        return;
+      }
+
       livePreviewProgressEnabledRef.current = false;
       livePreviewRunIdRef.current += 1;
       livePreviewQueueRef.current = [];
@@ -703,9 +800,28 @@ export function App(): JSX.Element {
     setRecorderSettings((currentSettings) => ({ ...currentSettings, expectedSpeakerCount }));
   }, []);
 
+  const handlePreviewWorkerCountChange = useCallback((previewWorkerCount: number) => {
+    const normalizedPreviewWorkerCount = normalizePreviewWorkerCount(previewWorkerCount);
+    writeStoredPreviewWorkerCount(normalizedPreviewWorkerCount);
+    setRecorderSettings((currentSettings) => ({
+      ...currentSettings,
+      previewWorkerCount: normalizedPreviewWorkerCount
+    }));
+  }, []);
+
+  const handleTranscriptionInferenceModeChange = useCallback((nextInferenceMode: TranscriptionInferenceMode) => {
+    const normalizedInferenceMode = normalizeTranscriptionInferenceMode(nextInferenceMode);
+    writeStoredTranscriptionInferenceMode(normalizedInferenceMode);
+    setRecorderSettings((currentSettings) => ({
+      ...currentSettings,
+      transcriptionInferenceMode: normalizedInferenceMode
+    }));
+  }, []);
+
   // 마이크 녹음을 시작하고 오프라인 전사용 회의 초안을 만든다.
   const handleStartRecording = useCallback(async () => {
     setAppError(null);
+    setStopRequestedElapsedMs(null);
     setLivePreviewProgress(null);
     setFinalTranscriptionProgress(null);
     setTranscriptionReview(null);
@@ -720,7 +836,7 @@ export function App(): JSX.Element {
     }
   }, [recorderSettings, startRecording]);
 
-  // 녹음을 종료하면 실시간 미리보기 내용 그대로 저장하고, 고품질 재처리는 사용자가 나중에 시작한다.
+  // 녹음을 종료하면 실시간 미리보기 내용 그대로 저장하고, 최종 고품질 보정은 사용자가 나중에 시작한다.
   const handleStopRecording = useCallback(async () => {
     const currentDraft = draftSessionRef.current;
 
@@ -728,21 +844,37 @@ export function App(): JSX.Element {
       return;
     }
 
+    let shouldPreserveLivePreviewQueue = false;
+
     try {
       if (recorderSettings.liveTranscriptionEnabled) {
         livePreviewAcceptingSnapshotsRef.current = false;
       }
 
       const previewWorkStats = getLivePreviewWorkStats();
+      const shouldAskHowToHandlePreviewWork =
+        recorderSettings.liveTranscriptionEnabled && hasLivePreviewWork(previewWorkStats);
+      const runId = livePreviewRunIdRef.current;
 
-      if (recorderSettings.liveTranscriptionEnabled && hasLivePreviewWork(previewWorkStats)) {
-        const stopChoice = await requestStopRecordingChoice(previewWorkStats);
+      shouldPreserveLivePreviewQueue = shouldAskHowToHandlePreviewWork;
+      livePreviewDrainAfterStopRef.current = shouldPreserveLivePreviewQueue;
+      livePreviewProgressEnabledRef.current = shouldPreserveLivePreviewQueue || livePreviewProgressEnabledRef.current;
+
+      setStopRequestedElapsedMs(elapsedMs);
+      setIsStoppingAfterLivePreviewDrain(shouldPreserveLivePreviewQueue);
+      setIsSaving(!shouldPreserveLivePreviewQueue);
+      setAppError(null);
+      setFinalTranscriptionProgress(null);
+
+      const recordedAudio = await stopRecording();
+
+      if (shouldAskHowToHandlePreviewWork) {
+        const remainingPreviewWorkStats = getLivePreviewWorkStats();
+        const stopChoice = hasLivePreviewWork(remainingPreviewWorkStats)
+          ? await requestStopRecordingChoice(remainingPreviewWorkStats)
+          : 'drain';
 
         if (stopChoice === 'drain') {
-          const runId = livePreviewRunIdRef.current;
-          livePreviewAcceptingSnapshotsRef.current = false;
-          setIsStoppingAfterLivePreviewDrain(true);
-
           try {
             await waitForLivePreviewWorkToSettle(currentDraft.id, runId);
           } finally {
@@ -754,14 +886,11 @@ export function App(): JSX.Element {
       }
 
       setIsSaving(true);
-      setAppError(null);
       setLivePreviewProgress(null);
-      setFinalTranscriptionProgress(null);
-
-      const recordedAudio = await stopRecording();
       const latestDraft = draftSessionRef.current;
 
       if (!latestDraft) {
+        discardLivePreviewWork();
         return;
       }
 
@@ -785,17 +914,24 @@ export function App(): JSX.Element {
 
       setDraftSession(null);
       setSelectedSession(savedSession);
+      discardLivePreviewWork();
       await refreshSessions();
 
     } catch (error) {
+      if (shouldPreserveLivePreviewQueue) {
+        discardLivePreviewWork();
+      }
+
       setAppError(error instanceof Error ? error.message : '회의 저장에 실패했습니다.');
     } finally {
+      livePreviewDrainAfterStopRef.current = false;
       setIsStoppingAfterLivePreviewDrain(false);
       setIsSaving(false);
       setFinalTranscriptionProgress(null);
     }
   }, [
     discardLivePreviewWork,
+    elapsedMs,
     getLivePreviewWorkStats,
     hasLivePreviewWork,
     isBusy,
@@ -810,7 +946,7 @@ export function App(): JSX.Element {
     const session = selectedSessionRef.current;
 
     if (!session?.audioFileName) {
-      setAppError('재처리할 녹음 파일이 없습니다.');
+      setAppError('최종 보정할 녹음 파일이 없습니다.');
       return;
     }
 
@@ -822,7 +958,7 @@ export function App(): JSX.Element {
       mode: 'final',
       stage: 'prepare',
       progress: 0,
-      message: '고품질 재처리 준비 중'
+      message: '최종 고품질 보정 준비 중'
     });
 
     try {
@@ -836,6 +972,7 @@ export function App(): JSX.Element {
           : {};
       const result = await window.meetingRecorder.transcribeSessionAudio({
         sessionId: session.id,
+        transcriptionInferenceMode: FINAL_REPROCESS_INFERENCE_MODE,
         ...speakerOptions
       });
       const refinedSession: MeetingSession = {
@@ -853,7 +990,7 @@ export function App(): JSX.Element {
 
       setTranscriptionReview(createTranscriptionReviewState(session, nextRefinedSession));
     } catch (error) {
-      setAppError(error instanceof Error ? error.message : '고품질 재처리에 실패했습니다.');
+      setAppError(error instanceof Error ? error.message : '최종 고품질 보정에 실패했습니다.');
     } finally {
       setIsReprocessing(false);
       setFinalTranscriptionProgress(null);
@@ -910,7 +1047,7 @@ export function App(): JSX.Element {
       setTranscriptionReview(null);
       await refreshSessions();
     } catch (error) {
-      setAppError(error instanceof Error ? error.message : '재처리 결과를 저장하지 못했습니다.');
+      setAppError(error instanceof Error ? error.message : '최종 보정 결과를 저장하지 못했습니다.');
     } finally {
       setIsSaving(false);
     }
@@ -1156,7 +1293,7 @@ export function App(): JSX.Element {
         </div>
         <SessionList
           activeSessionId={activeSession?.id}
-          disabled={recordingStatus === 'recording'}
+          disabled={recordingStatus === 'recording' || isBusy}
           sessions={sessions}
           onSelect={handleSelectSession}
         />
@@ -1165,7 +1302,7 @@ export function App(): JSX.Element {
       <main className="workspace">
         <RecorderPanel
           captureDistantSpeech={recorderSettings.captureDistantSpeech}
-          elapsedMs={elapsedMs}
+          elapsedMs={stopRequestedElapsedMs ?? elapsedMs}
           error={appError ?? recorderError}
           inputLevel={inputLevel}
           inputSource={recorderSettings.inputSource}
@@ -1177,7 +1314,7 @@ export function App(): JSX.Element {
             isStoppingAfterLivePreviewDrain
               ? '미리보기 처리 후 종료 중'
               : isReprocessing
-                ? '고품질 재처리 중'
+                ? '최종 고품질 보정 중'
                 : isSaving
                   ? '저장 중'
                   : undefined
@@ -1210,9 +1347,10 @@ export function App(): JSX.Element {
           <TranscriptPanel
             isLivePreviewing={isLivePreviewing}
             isRecording={recordingStatus === 'recording'}
+            showLivePreviewStatus={recordingStatus === 'recording' || isStoppingAfterLivePreviewDrain}
             isRealtimeTranscriptionEnabled={recorderSettings.liveTranscriptionEnabled}
             canPlaySegments={Boolean(audioUrl && selectedSession && !draftSession)}
-            memoDisabled={isBusy || recordingStatus === 'recording'}
+            memoDisabled={isSaving || isReprocessing || recordingStatus === 'recording'}
             playingSegmentId={playingSegmentId}
             previewProgress={livePreviewProgress}
             previewActiveWorkerCount={livePreviewQueueStats.activeCount}
@@ -1225,6 +1363,15 @@ export function App(): JSX.Element {
             onExport={selectedSession && !draftSession ? handleExportTranscript : undefined}
           />
           <div className="sideStack">
+            <ProcessingSettingsPanel
+              disabled={recordingStatus === 'recording' || isBusy}
+              inferenceMode={transcriptionInferenceMode}
+              maxWorkerCount={MAX_PREVIEW_WORKER_COUNT}
+              minWorkerCount={MIN_PREVIEW_WORKER_COUNT}
+              workerCount={previewWorkerCount}
+              onInferenceModeChange={handleTranscriptionInferenceModeChange}
+              onWorkerCountChange={handlePreviewWorkerCountChange}
+            />
             <SessionManagementPanel
               allowDelete={Boolean(selectedSession && !draftSession && recordingStatus !== 'recording' && !isBusy)}
               canReprocess={Boolean(selectedSession?.audioFileName && !draftSession && recordingStatus !== 'recording')}

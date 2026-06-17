@@ -10,6 +10,7 @@ import type {
   OfflineTranscriptionRequest,
   OfflineTranscriptionResult,
   TranscriptSegment,
+  TranscriptionInferenceMode,
   TranscriptionProgressEvent
 } from '../shared/types';
 import { PersistentTranscriptionWorker, type ProgressCallback } from './persistentTranscriptionWorker';
@@ -21,12 +22,13 @@ const DEFAULT_STT_TASK = 'transcribe';
 const DEFAULT_PREVIEW_BATCH_SIZE = '2';
 const DEFAULT_PREVIEW_THREAD_COUNT = '1';
 const DEFAULT_PREVIEW_WORKER_COUNT = 2;
-const MAX_PREVIEW_WORKER_COUNT = 4;
+const MAX_PREVIEW_WORKER_COUNT = 8;
 const DEFAULT_PERSISTENT_THREAD_COUNT = '2';
 const DEFAULT_FINAL_CHUNK_MS = 10 * 60 * 1000;
 const SINGLE_PASS_CHUNK_COUNT = 1;
 const FINAL_WORKER_ID = 'final-1';
 const FINAL_WORKER_LABEL = '최종 전사';
+const DEFAULT_TRANSCRIPTION_INFERENCE_MODE: TranscriptionInferenceMode = 'literal';
 
 type TranscriptionWorkerPurpose = 'final' | 'preview';
 
@@ -186,12 +188,15 @@ export class LocalTranscriptionService {
       return this.transcribeFinalAudioInChunks(request, audioPath, onProgress);
     }
 
+    const inferenceMode = this.getTranscriptionInferenceMode(request.transcriptionInferenceMode);
+
     return this.getFinalWorker().transcribe(
       {
         request,
         audioPath,
         transcribeOnly: false,
         batchSize: this.getBatchSize(false),
+        finalDecoder: inferenceMode,
         minSpeakers: request.minSpeakers,
         maxSpeakers: request.maxSpeakers
       },
@@ -204,7 +209,8 @@ export class LocalTranscriptionService {
     audioPath: string,
     onProgress?: ProgressCallback
   ): Promise<OfflineTranscriptionResult> {
-    const managedWorker = this.getNextPreviewWorker();
+    const managedWorker = this.getNextPreviewWorker(this.getPreviewWorkerCount(request.previewWorkerCount));
+    const inferenceMode = this.getTranscriptionInferenceMode(request.transcriptionInferenceMode);
     managedWorker.activeJobs += 1;
 
     try {
@@ -212,10 +218,13 @@ export class LocalTranscriptionService {
         {
           request,
           audioPath,
-          transcribeOnly: true,
+          transcribeOnly: false,
           batchSize: this.getBatchSize(true),
+          finalDecoder: inferenceMode,
           minSpeakers: request.minSpeakers,
-          maxSpeakers: request.maxSpeakers
+          maxSpeakers: request.maxSpeakers,
+          allowDiarizationFallback: true,
+          standardDecoderForTranscribeOnly: true
         },
         this.withWorkerProgress(managedWorker.id, managedWorker.label, onProgress)
       );
@@ -242,6 +251,7 @@ export class LocalTranscriptionService {
     const chunkDirectory = await mkdtemp(path.join(tmpdir(), 'meeting-recorder-final-chunks-'));
     const flushedSegmentsPath = path.join(chunkDirectory, 'segments.jsonl');
     const speakers = new Map<string, OfflineTranscriptionResult['speakers'][number]>();
+    const inferenceMode = this.getTranscriptionInferenceMode(request.transcriptionInferenceMode);
     let language: string | undefined;
     let flushedSegmentCount = 0;
 
@@ -276,6 +286,7 @@ export class LocalTranscriptionService {
               audioPath: chunkPath,
               transcribeOnly: false,
               batchSize: this.getBatchSize(false),
+              finalDecoder: inferenceMode,
               minSpeakers: request.minSpeakers,
               maxSpeakers: request.maxSpeakers
             },
@@ -474,9 +485,17 @@ export class LocalTranscriptionService {
   }
 
   // 실시간 미리보기는 여러 상주 worker에 분산해 미처리 청크가 한 줄로 쌓이지 않게 한다.
-  private getPreviewWorkers(): ManagedPreviewWorker[] {
+  private getPreviewWorkers(workerCount = this.getPreviewWorkerCount()): ManagedPreviewWorker[] {
+    if (this.previewWorkers && this.previewWorkers.length !== workerCount) {
+      const hasActiveJobs = this.previewWorkers.some((previewWorker) => previewWorker.activeJobs > 0);
+
+      if (!hasActiveJobs) {
+        this.shutdownPreviewWorkers();
+      }
+    }
+
     if (!this.previewWorkers) {
-      this.previewWorkers = Array.from({ length: this.getPreviewWorkerCount() }, (_unused, index) => ({
+      this.previewWorkers = Array.from({ length: workerCount }, (_unused, index) => ({
         id: `preview-${index + 1}`,
         label: `미리보기 ${index + 1}`,
         worker: new PersistentTranscriptionWorker(async () => {
@@ -497,8 +516,8 @@ export class LocalTranscriptionService {
     return this.previewWorkers;
   }
 
-  private getNextPreviewWorker(): ManagedPreviewWorker {
-    const workers = this.getPreviewWorkers();
+  private getNextPreviewWorker(workerCount = this.getPreviewWorkerCount()): ManagedPreviewWorker {
+    const workers = this.getPreviewWorkers(workerCount);
 
     for (let offset = 0; offset < workers.length; offset += 1) {
       const index = (this.previewWorkerCursor + offset) % workers.length;
@@ -542,9 +561,10 @@ export class LocalTranscriptionService {
 
   // 상주 worker가 모델을 한 번 로드할 때 필요한 실행 인자를 구성한다.
   private createPersistentWorkerArgs(assetRoot: string, purpose: TranscriptionWorkerPurpose): string[] {
+    const useFinalQualityModel = purpose === 'preview';
     const args = [
       '--model',
-      this.getWhisperModelPath(assetRoot, purpose),
+      this.getWhisperModelPath(assetRoot, purpose, useFinalQualityModel),
       '--device',
       this.getWorkerDevice(purpose),
       '--compute-type',
@@ -556,13 +576,28 @@ export class LocalTranscriptionService {
       '--asset-root',
       assetRoot,
       '--model-dir',
-      this.getWhisperModelDirectory(assetRoot, purpose)
+      this.getWhisperModelDirectory(assetRoot, purpose, useFinalQualityModel)
     ];
 
     this.appendOptionalArg(args, '--threads', this.getPersistentThreadCount(purpose));
     this.appendOptionalArg(args, '--cluster-threshold', process.env.MEETING_RECORDER_DIARIZATION_CLUSTER_THRESHOLD);
     this.appendOptionalArg(args, '--diarization-min-turn-ms', process.env.MEETING_RECORDER_DIARIZATION_MIN_TURN_MS);
     this.appendOptionalArg(args, '--diarization-merge-gap-ms', process.env.MEETING_RECORDER_DIARIZATION_MERGE_GAP_MS);
+    this.appendOptionalArg(
+      args,
+      '--diarization-overlap-min-turn-ms',
+      process.env.MEETING_RECORDER_DIARIZATION_OVERLAP_MIN_TURN_MS
+    );
+    this.appendOptionalArg(
+      args,
+      '--diarization-overlap-bridge-gap-ms',
+      process.env.MEETING_RECORDER_DIARIZATION_OVERLAP_BRIDGE_GAP_MS
+    );
+    this.appendOptionalArg(
+      args,
+      '--diarization-overlap-padding-ms',
+      process.env.MEETING_RECORDER_DIARIZATION_OVERLAP_PADDING_MS
+    );
     this.appendOptionalArg(args, '--no-speech-threshold', process.env.MEETING_RECORDER_STT_NO_SPEECH_THRESHOLD);
     this.appendOptionalArg(args, '--log-prob-threshold', process.env.MEETING_RECORDER_STT_LOG_PROB_THRESHOLD);
     this.appendOptionalArg(
@@ -703,8 +738,12 @@ export class LocalTranscriptionService {
   }
 
   // standalone 자산에 포함된 faster-whisper 모델 폴더를 기본 모델로 사용한다.
-  private getWhisperModelPath(assetRoot: string, purpose: TranscriptionWorkerPurpose): string {
-    if (purpose === 'preview' && process.env.MEETING_RECORDER_STT_PREVIEW_MODEL) {
+  private getWhisperModelPath(
+    assetRoot: string,
+    purpose: TranscriptionWorkerPurpose,
+    useFinalQualityModel = false
+  ): string {
+    if (purpose === 'preview' && !useFinalQualityModel && process.env.MEETING_RECORDER_STT_PREVIEW_MODEL) {
       return process.env.MEETING_RECORDER_STT_PREVIEW_MODEL;
     }
 
@@ -715,8 +754,12 @@ export class LocalTranscriptionService {
     return path.join(assetRoot, 'whisper/faster-whisper-large-v3');
   }
 
-  private getWhisperModelDirectory(assetRoot: string, purpose: TranscriptionWorkerPurpose): string {
-    if (purpose === 'preview' && process.env.MEETING_RECORDER_STT_PREVIEW_MODEL_DIR) {
+  private getWhisperModelDirectory(
+    assetRoot: string,
+    purpose: TranscriptionWorkerPurpose,
+    useFinalQualityModel = false
+  ): string {
+    if (purpose === 'preview' && !useFinalQualityModel && process.env.MEETING_RECORDER_STT_PREVIEW_MODEL_DIR) {
       return process.env.MEETING_RECORDER_STT_PREVIEW_MODEL_DIR;
     }
 
@@ -764,6 +807,10 @@ export class LocalTranscriptionService {
     return process.env.MEETING_RECORDER_STT_BATCH_SIZE;
   }
 
+  private getTranscriptionInferenceMode(value?: TranscriptionInferenceMode): TranscriptionInferenceMode {
+    return value === 'contextual' || value === 'literal' ? value : DEFAULT_TRANSCRIPTION_INFERENCE_MODE;
+  }
+
   // 녹음 중 미리보기 부하를 고려해 상주 모델의 CPU 스레드 수를 보수적으로 둔다.
   private getPersistentThreadCount(purpose: TranscriptionWorkerPurpose): string | undefined {
     if (purpose === 'preview') {
@@ -773,8 +820,10 @@ export class LocalTranscriptionService {
     return process.env.MEETING_RECORDER_STT_THREADS ?? DEFAULT_PERSISTENT_THREAD_COUNT;
   }
 
-  private getPreviewWorkerCount(): number {
-    const rawValue = Number(process.env.MEETING_RECORDER_STT_PREVIEW_WORKERS ?? DEFAULT_PREVIEW_WORKER_COUNT);
+  private getPreviewWorkerCount(requestedWorkerCount?: number): number {
+    const rawValue = Number(
+      requestedWorkerCount ?? process.env.MEETING_RECORDER_STT_PREVIEW_WORKERS ?? DEFAULT_PREVIEW_WORKER_COUNT
+    );
 
     if (!Number.isFinite(rawValue)) {
       return DEFAULT_PREVIEW_WORKER_COUNT;
