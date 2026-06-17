@@ -7,12 +7,15 @@ import argparse
 import inspect
 import json
 import os
+import re
 import sys
 import traceback
 import warnings
 from typing import Any
 
 from diarization import (
+    DEFAULT_DIARIZATION_MERGE_GAP_MS,
+    DEFAULT_DIARIZATION_MIN_TURN_MS,
     DiarizedTurn,
     build_speakers,
     diarize_audio,
@@ -29,6 +32,8 @@ from quality_transcription import (
 DEFAULT_LANGUAGE = "ko"
 DEFAULT_TASK = "transcribe"
 DEFAULT_CLUSTER_THRESHOLD = 0.5
+SENTENCE_BOUNDARY_PATTERN = re.compile(r"[^.!?。！？…]+[.!?。！？…]*")
+SENTENCE_BOUNDARY_CHARS = ".!?。！？…"
 # 미리보기 전사는 아직 화자분리를 하지 않으므로 고정 화자로 표시한다.
 PREVIEW_SPEAKER = {"id": "speaker-preview", "name": "미리보기", "color": "#607d8b"}
 
@@ -59,6 +64,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cluster-threshold", type=float, default=DEFAULT_CLUSTER_THRESHOLD, help="화자 클러스터링 임계값")
     parser.add_argument("--min-speakers", type=int, help="예상 최소 화자 수")
     parser.add_argument("--max-speakers", type=int, help="예상 최대 화자 수")
+    parser.add_argument(
+        "--diarization-min-turn-ms",
+        type=float,
+        default=DEFAULT_DIARIZATION_MIN_TURN_MS,
+        help="이 길이보다 짧은 화자 턴은 주변 문맥으로 보정",
+    )
+    parser.add_argument(
+        "--diarization-merge-gap-ms",
+        type=float,
+        default=DEFAULT_DIARIZATION_MERGE_GAP_MS,
+        help="같은 화자 턴을 합칠 최대 공백",
+    )
     parser.add_argument("--batch-size", type=int, default=4, help="WhisperX 배치 크기")
     parser.add_argument("--threads", type=int, help="CPU 추론 스레드 수")
     parser.add_argument("--transcribe-only", action="store_true", help="화자분리 없이 전사 결과만 반환")
@@ -294,6 +311,74 @@ def append_segment(
     )
 
 
+def split_text_sentences(text: str) -> list[str]:
+    """문장 부호를 기준으로 전사 텍스트를 표시/재생 가능한 문장 단위로 나눈다."""
+
+    normalized_text = text.strip()
+
+    if not normalized_text:
+        return []
+
+    sentences = [match.group(0).strip() for match in SENTENCE_BOUNDARY_PATTERN.finditer(normalized_text)]
+    return sentences or [normalized_text]
+
+
+def append_text_segments(
+    segments: list[dict[str, Any]],
+    speaker_id: str,
+    start: float,
+    end: float,
+    text: str,
+    confidence: float,
+    overlap_group_id: str | None,
+) -> None:
+    """타임스탬프가 단어별로 없을 때 텍스트 문장 길이에 비례해 시간을 나눠 추가한다."""
+
+    sentences = split_text_sentences(text)
+
+    if len(sentences) <= 1:
+        append_segment(segments, speaker_id, start, end, text, confidence, overlap_group_id)
+        return
+
+    total_weight = sum(max(1, len(sentence)) for sentence in sentences)
+    duration = max(0.0, end - start)
+    cursor = start
+
+    for index, sentence in enumerate(sentences):
+        if index == len(sentences) - 1:
+            sentence_end = end
+        else:
+            sentence_end = cursor + duration * (max(1, len(sentence)) / total_weight)
+
+        append_segment(segments, speaker_id, cursor, sentence_end, sentence, confidence, overlap_group_id)
+        cursor = sentence_end
+
+
+def is_sentence_boundary_word(word: dict[str, Any]) -> bool:
+    """Whisper 단어 조각이 문장을 끝내는지 확인한다."""
+
+    return normalize_word_text(word).rstrip().endswith(tuple(SENTENCE_BOUNDARY_CHARS))
+
+
+def split_words_by_sentence(words: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+    """단어 타임스탬프를 보존하면서 문장 부호 기준으로 단어 그룹을 나눈다."""
+
+    groups: list[list[dict[str, Any]]] = []
+    current_group: list[dict[str, Any]] = []
+
+    for word in words:
+        current_group.append(word)
+
+        if is_sentence_boundary_word(word):
+            groups.append(current_group)
+            current_group = []
+
+    if current_group:
+        groups.append(current_group)
+
+    return groups
+
+
 def build_segments(
     result: dict[str, Any],
     turns: list[DiarizedTurn],
@@ -314,7 +399,7 @@ def build_segments(
             speaker_label = get_speaker_label(start, end, turns)
             speaker_id = label_to_id.get(speaker_label, fallback_speaker_id)
             overlap_group_id = get_overlap_group(start, end, overlaps)
-            append_segment(
+            append_text_segments(
                 segments,
                 speaker_id,
                 start,
@@ -325,45 +410,23 @@ def build_segments(
             )
             continue
 
-        current_words: list[dict[str, Any]] = []
-        first_start = float(words[0].get("start", raw_segment.get("start", 0.0)))
-        first_end = float(words[0].get("end", first_start))
-        current_speaker_label = get_speaker_label(first_start, first_end, turns)
-
-        for word in words:
-            word_start = float(word.get("start", raw_segment.get("start", 0.0)))
-            word_end = float(word.get("end", word_start))
-            word_speaker_label = get_speaker_label(word_start, word_end, turns)
-
-            if current_words and word_speaker_label != current_speaker_label:
-                flush_word_group(segments, current_words, current_speaker_label, label_to_id, fallback_speaker_id, overlaps)
-                current_words = []
-
-            current_speaker_label = word_speaker_label
-            current_words.append(word)
-
-        if current_words:
-            flush_word_group(segments, current_words, current_speaker_label, label_to_id, fallback_speaker_id, overlaps)
+        for sentence_words in split_words_by_sentence(words):
+            start = float(sentence_words[0].get("start", raw_segment.get("start", 0.0)))
+            end = float(sentence_words[-1].get("end", start))
+            speaker_label = get_speaker_label(start, end, turns)
+            speaker_id = label_to_id.get(speaker_label, fallback_speaker_id)
+            overlap_group_id = get_overlap_group(start, end, overlaps)
+            append_segment(
+                segments,
+                speaker_id,
+                start,
+                end,
+                join_word_text(sentence_words),
+                score_from_words(sentence_words),
+                overlap_group_id,
+            )
 
     return segments
-
-
-def flush_word_group(
-    segments: list[dict[str, Any]],
-    words: list[dict[str, Any]],
-    speaker_label: str,
-    label_to_id: dict[str, str],
-    fallback_speaker_id: str,
-    overlaps: list[OverlapRegion],
-) -> None:
-    """같은 화자로 묶인 단어들을 하나의 전사 구간으로 합친다."""
-
-    start = float(words[0].get("start", 0.0))
-    end = float(words[-1].get("end", start))
-    text = join_word_text(words)
-    speaker_id = label_to_id.get(speaker_label, fallback_speaker_id)
-    overlap_group_id = get_overlap_group(start, end, overlaps)
-    append_segment(segments, speaker_id, start, end, text, score_from_words(words), overlap_group_id)
 
 
 def build_output(result: dict[str, Any], turns: list[DiarizedTurn]) -> dict[str, Any]:
@@ -391,7 +454,7 @@ def build_transcription_only_output(result: dict[str, Any]) -> dict[str, Any]:
     for raw_segment in result.get("segments", []):
         start = float(raw_segment.get("start", 0.0))
         end = float(raw_segment.get("end", start))
-        append_segment(
+        append_text_segments(
             segments,
             PREVIEW_SPEAKER["id"],
             start,

@@ -4,6 +4,7 @@ import type {
   MeetingSessionSummary,
   RecordingStatus,
   SessionDetailsUpdateRequest,
+  TranscriptSegment,
   TranscriptionProgressEvent
 } from '../../shared/types';
 import { buildTranscriptText } from '../../shared/transcriptFormatter';
@@ -12,14 +13,30 @@ import { SessionList } from './components/SessionList';
 import { SessionManagementPanel } from './components/SessionManagementPanel';
 import { SpeakerEditor } from './components/SpeakerEditor';
 import { TranscriptPanel } from './components/TranscriptPanel';
-import { type RecorderSettings, useRecorder } from './hooks/useRecorder';
+import { type RecorderInputSource, type RecorderSettings, useRecorder } from './hooks/useRecorder';
 import { createDraftMeetingSession } from './services/meetingFactory';
 import { transcribeRecordedAudio } from './services/offlineTranscription';
 
-// 녹음 안정성을 지키기 위해 5초마다 한 번씩만 미리보기 전사를 요청한다.
-const LIVE_PREVIEW_INITIAL_DELAY_MS = 5_000;
-const LIVE_PREVIEW_INTERVAL_MS = 5_000;
-const LIVE_PREVIEW_MIN_NEW_AUDIO_MS = 5_000;
+// 전사용 오디오 청크는 5초 단위로 만들어지고, UI 루프는 준비된 청크가 있는지만 가볍게 확인한다.
+const LIVE_PREVIEW_INITIAL_DELAY_MS = 1_000;
+const LIVE_PREVIEW_INTERVAL_MS = 1_000;
+const PREVIEW_SEGMENT_ID_PREFIX = 'preview';
+
+function createPreviewSegmentId(previewStartMs: number, segmentId: string): string {
+  return `${PREVIEW_SEGMENT_ID_PREFIX}-${previewStartMs}-${segmentId}`;
+}
+
+function mergePreviewSegments(
+  currentSegments: TranscriptSegment[],
+  nextPreviewSegments: TranscriptSegment[]
+): TranscriptSegment[] {
+  const nextPreviewIds = new Set(nextPreviewSegments.map((segment) => segment.id));
+
+  return [
+    ...currentSegments.filter((segment) => !nextPreviewIds.has(segment.id)),
+    ...nextPreviewSegments
+  ].sort((a, b) => a.startMs - b.startMs || a.endMs - b.endMs || a.id.localeCompare(b.id));
+}
 
 // 전체 앱 상태를 조율하고 메인 프로세스 IPC API를 호출한다.
 export function App(): JSX.Element {
@@ -31,6 +48,7 @@ export function App(): JSX.Element {
     startRecording,
     stopRecording,
     createRecordingSnapshot,
+    setLiveTranscriptionPreviewEnabled,
     updateSensitivity
   } = useRecorder();
   const draftSessionRef = useRef<MeetingSession | null>(null);
@@ -39,6 +57,8 @@ export function App(): JSX.Element {
   const livePreviewInFlightRef = useRef(false);
   const livePreviewActiveRunRef = useRef<number | null>(null);
   const livePreviewLastDurationRef = useRef(0);
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const segmentPlaybackTimeoutRef = useRef<number | null>(null);
   const [sessions, setSessions] = useState<MeetingSessionSummary[]>([]);
   const [selectedSession, setSelectedSession] = useState<MeetingSession | null>(null);
   const [draftSession, setDraftSession] = useState<MeetingSession | null>(null);
@@ -46,11 +66,15 @@ export function App(): JSX.Element {
   const [isLivePreviewing, setIsLivePreviewing] = useState(false);
   const [recorderSettings, setRecorderSettings] = useState<RecorderSettings>({
     sensitivity: 1.8,
-    captureDistantSpeech: true
+    captureDistantSpeech: true,
+    inputSource: 'microphone',
+    liveTranscriptionEnabled: false,
+    expectedSpeakerCount: 0
   });
+  const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [playingSegmentId, setPlayingSegmentId] = useState<string | null>(null);
   const [livePreviewProgress, setLivePreviewProgress] = useState<TranscriptionProgressEvent | null>(null);
-  const [finalTranscriptionProgress, setFinalTranscriptionProgress] =
-    useState<TranscriptionProgressEvent | null>(null);
+  const [finalTranscriptionProgress, setFinalTranscriptionProgress] = useState<TranscriptionProgressEvent | null>(null);
   const [appError, setAppError] = useState<string | null>(null);
 
   const activeSession = draftSession ?? selectedSession;
@@ -63,6 +87,64 @@ export function App(): JSX.Element {
   useEffect(() => {
     recordingStatusRef.current = recordingStatus;
   }, [recordingStatus]);
+
+  useEffect(() => {
+    let objectUrl: string | null = null;
+    let canceled = false;
+
+    setAudioUrl(null);
+    setPlayingSegmentId(null);
+
+    if (segmentPlaybackTimeoutRef.current) {
+      window.clearTimeout(segmentPlaybackTimeoutRef.current);
+      segmentPlaybackTimeoutRef.current = null;
+    }
+
+    audioRef.current?.pause();
+
+    if (!selectedSession?.audioFileName || draftSession) {
+      return () => undefined;
+    }
+
+    window.meetingRecorder
+      .getAudioFile(selectedSession.id)
+      .then((payload) => {
+        if (!payload) {
+          return;
+        }
+
+        const audioData = payload.audioData instanceof Uint8Array ? payload.audioData : new Uint8Array(payload.audioData);
+        objectUrl = URL.createObjectURL(new Blob([audioData], { type: payload.audioMimeType ?? 'audio/webm' }));
+
+        if (canceled) {
+          URL.revokeObjectURL(objectUrl);
+          return;
+        }
+
+        setAudioUrl(objectUrl);
+      })
+      .catch((error) => {
+        if (!canceled) {
+          setAppError(error instanceof Error ? error.message : '녹음 파일을 불러오지 못했습니다.');
+        }
+      });
+
+    return () => {
+      canceled = true;
+
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+      }
+    };
+  }, [draftSession, selectedSession?.audioFileName, selectedSession?.id]);
+
+  useEffect(() => {
+    return () => {
+      if (segmentPlaybackTimeoutRef.current) {
+        window.clearTimeout(segmentPlaybackTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     return window.meetingRecorder.onTranscriptionProgress((progress) => {
@@ -100,14 +182,10 @@ export function App(): JSX.Element {
 
       const snapshot = await createRecordingSnapshot();
       const snapshotEndMs = snapshot ? (snapshot.startOffsetMs ?? 0) + snapshot.durationMs : 0;
-      const hasEnoughAudio =
-        snapshot &&
-        snapshotEndMs >= LIVE_PREVIEW_INITIAL_DELAY_MS &&
-        snapshotEndMs - livePreviewLastDurationRef.current >= LIVE_PREVIEW_MIN_NEW_AUDIO_MS;
 
       if (
         !snapshot ||
-        !hasEnoughAudio ||
+        snapshotEndMs <= livePreviewLastDurationRef.current ||
         livePreviewRunIdRef.current !== runId ||
         recordingStatusRef.current !== 'recording'
       ) {
@@ -126,6 +204,10 @@ export function App(): JSX.Element {
         });
         const previewResult = payload.result;
 
+        if (payload.error) {
+          setAppError(`실시간 전사에 실패했습니다.\n${payload.error}`);
+        }
+
         if (
           !previewResult ||
           livePreviewRunIdRef.current !== runId ||
@@ -140,21 +222,15 @@ export function App(): JSX.Element {
           }
 
           const hasPreviewSegments = previewResult.segments.length > 0;
-          const previewStartMs = snapshot.startOffsetMs ?? 0;
-          const previewEndMs = previewStartMs + snapshot.durationMs;
+          const previewStartMs = Math.max(0, Math.round(snapshot.startOffsetMs ?? 0));
           const shiftedSegments = previewResult.segments.map((segment) => ({
             ...segment,
-            id: `preview-${previewStartMs}-${segment.id}`,
+            id: createPreviewSegmentId(previewStartMs, segment.id),
             startMs: previewStartMs + segment.startMs,
             endMs: previewStartMs + segment.endMs
           }));
           const nextSegments = hasPreviewSegments
-            ? [
-                ...currentSession.segments.filter(
-                  (segment) => segment.endMs <= previewStartMs || segment.startMs >= previewEndMs
-                ),
-                ...shiftedSegments
-              ].sort((a, b) => a.startMs - b.startMs)
+            ? mergePreviewSegments(currentSession.segments, shiftedSegments)
             : currentSession.segments;
           const nextSession: MeetingSession = {
             ...currentSession,
@@ -183,7 +259,7 @@ export function App(): JSX.Element {
   );
 
   useEffect(() => {
-    if (recordingStatus !== 'recording' || !draftSession?.id) {
+    if (recordingStatus !== 'recording' || !draftSession?.id || !recorderSettings.liveTranscriptionEnabled) {
       return;
     }
 
@@ -209,7 +285,7 @@ export function App(): JSX.Element {
         setIsLivePreviewing(false);
       }
     };
-  }, [draftSession?.id, recordingStatus, runLivePreview]);
+  }, [draftSession?.id, recorderSettings.liveTranscriptionEnabled, recordingStatus, runLivePreview]);
 
   // 목록에서 선택한 회의의 상세 데이터를 불러온다.
   const handleSelectSession = useCallback(
@@ -239,6 +315,23 @@ export function App(): JSX.Element {
     setRecorderSettings((currentSettings) => ({ ...currentSettings, captureDistantSpeech }));
   }, []);
 
+  // 테스트 녹음 대상이 되는 입력 소스를 마이크 또는 시스템 오디오로 전환한다.
+  const handleInputSourceChange = useCallback((inputSource: RecorderInputSource) => {
+    setRecorderSettings((settings) => ({ ...settings, inputSource }));
+  }, []);
+
+  // 실시간 전사 모드는 녹음 중 미리보기 청크 전사를 켜고 끈다.
+  const handleLiveTranscriptionEnabledChange = useCallback((liveTranscriptionEnabled: boolean) => {
+    setRecorderSettings((currentSettings) => ({ ...currentSettings, liveTranscriptionEnabled }));
+    setLiveTranscriptionPreviewEnabled(liveTranscriptionEnabled);
+    setLivePreviewProgress(null);
+  }, [setLiveTranscriptionPreviewEnabled]);
+
+  // 참석자 수를 알 때 최종 화자분리 클러스터 수를 고정해 자동 분리 흔들림을 줄인다.
+  const handleExpectedSpeakerCountChange = useCallback((expectedSpeakerCount: number) => {
+    setRecorderSettings((currentSettings) => ({ ...currentSettings, expectedSpeakerCount }));
+  }, []);
+
   // 마이크 녹음을 시작하고 오프라인 전사용 회의 초안을 만든다.
   const handleStartRecording = useCallback(async () => {
     setAppError(null);
@@ -246,9 +339,8 @@ export function App(): JSX.Element {
     setFinalTranscriptionProgress(null);
 
     try {
-      await startRecording(recorderSettings);
-
       const nextSession = createDraftMeetingSession();
+      await startRecording(recorderSettings, nextSession.id);
       setSelectedSession(null);
       setDraftSession(nextSession);
     } catch (error) {
@@ -275,7 +367,15 @@ export function App(): JSX.Element {
         return;
       }
 
-      const transcriptionPayload = await transcribeRecordedAudio(latestDraft.id, recordedAudio);
+      const expectedSpeakerCount = recorderSettings.expectedSpeakerCount;
+      const speakerOptions =
+        expectedSpeakerCount > 0
+          ? {
+              minSpeakers: expectedSpeakerCount,
+              maxSpeakers: expectedSpeakerCount
+            }
+          : undefined;
+      const transcriptionPayload = await transcribeRecordedAudio(latestDraft.id, recordedAudio, speakerOptions);
       const transcriptionResult = transcriptionPayload.result;
       const resultSession: MeetingSession = {
         ...latestDraft,
@@ -294,6 +394,7 @@ export function App(): JSX.Element {
       const savedSession = await window.meetingRecorder.saveSession({
         session: completedSession,
         audioData: transcriptionPayload.audioData,
+        audioRecordingId: recordedAudio?.recordingId,
         audioMimeType: recordedAudio?.mimeType
       });
 
@@ -310,7 +411,7 @@ export function App(): JSX.Element {
       setIsSaving(false);
       setFinalTranscriptionProgress(null);
     }
-  }, [refreshSessions, stopRecording]);
+  }, [recorderSettings.expectedSpeakerCount, refreshSessions, stopRecording]);
 
   // 저장된 회의의 화자명은 파일에 반영하고, 녹음 중 초안은 메모리만 수정한다.
   const handleRenameSpeaker = useCallback(
@@ -388,6 +489,84 @@ export function App(): JSX.Element {
     [refreshSessions, selectedSession]
   );
 
+  // 선택한 문장 구간만 재생하고 구간 끝에서 자동으로 멈춘다.
+  const handlePlaySegment = useCallback(
+    (segment: TranscriptSegment) => {
+      const audio = audioRef.current;
+
+      if (!audio || !audioUrl) {
+        return;
+      }
+
+      if (segmentPlaybackTimeoutRef.current) {
+        window.clearTimeout(segmentPlaybackTimeoutRef.current);
+        segmentPlaybackTimeoutRef.current = null;
+      }
+
+      if (playingSegmentId === segment.id && !audio.paused) {
+        audio.pause();
+        setPlayingSegmentId(null);
+        return;
+      }
+
+      audio.currentTime = Math.max(0, segment.startMs / 1000);
+      setPlayingSegmentId(segment.id);
+
+      const stopDelayMs = Math.max(250, segment.endMs - segment.startMs);
+      segmentPlaybackTimeoutRef.current = window.setTimeout(() => {
+        audio.pause();
+        setPlayingSegmentId(null);
+        segmentPlaybackTimeoutRef.current = null;
+      }, stopDelayMs);
+
+      void audio.play().catch((error) => {
+        if (segmentPlaybackTimeoutRef.current) {
+          window.clearTimeout(segmentPlaybackTimeoutRef.current);
+          segmentPlaybackTimeoutRef.current = null;
+        }
+
+        setPlayingSegmentId(null);
+        setAppError(error instanceof Error ? error.message : '문장 재생을 시작하지 못했습니다.');
+      });
+    },
+    [audioUrl, playingSegmentId]
+  );
+
+  // 문장별 메모를 초안 또는 저장된 세션에 반영한다.
+  const handleUpdateSegmentMemo = useCallback(
+    async (segmentId: string, memo: string) => {
+      const draft = draftSessionRef.current;
+
+      if (draft) {
+        setDraftSession({
+          ...draft,
+          segments: draft.segments.map((segment) =>
+            segment.id === segmentId ? { ...segment, memo } : segment
+          ),
+          updatedAt: new Date().toISOString()
+        });
+        return;
+      }
+
+      if (!selectedSession) {
+        return;
+      }
+
+      try {
+        const updatedSession = await window.meetingRecorder.updateSegmentMemo({
+          sessionId: selectedSession.id,
+          segmentId,
+          memo
+        });
+        setSelectedSession(updatedSession);
+        await refreshSessions();
+      } catch (error) {
+        setAppError(error instanceof Error ? error.message : '문장 메모를 저장하지 못했습니다.');
+      }
+    },
+    [refreshSessions, selectedSession]
+  );
+
   // 선택된 회의의 원본 녹음 파일을 사용자가 고른 위치로 저장한다.
   const handleExportAudio = useCallback(async () => {
     if (!selectedSession) {
@@ -459,11 +638,17 @@ export function App(): JSX.Element {
           elapsedMs={elapsedMs}
           error={appError ?? recorderError}
           inputLevel={inputLevel}
+          inputSource={recorderSettings.inputSource}
+          liveTranscriptionEnabled={recorderSettings.liveTranscriptionEnabled}
+          expectedSpeakerCount={recorderSettings.expectedSpeakerCount}
           progressPercent={finalTranscriptionProgress?.progress}
           isLivePreviewing={isLivePreviewing}
           sensitivity={recorderSettings.sensitivity}
           status={visibleStatus}
           onCaptureDistantSpeechChange={handleCaptureDistantSpeechChange}
+          onExpectedSpeakerCountChange={handleExpectedSpeakerCountChange}
+          onInputSourceChange={handleInputSourceChange}
+          onLiveTranscriptionEnabledChange={handleLiveTranscriptionEnabledChange}
           onSensitivityChange={handleSensitivityChange}
           onStart={handleStartRecording}
           onStop={handleStopRecording}
@@ -473,8 +658,14 @@ export function App(): JSX.Element {
           <TranscriptPanel
             isLivePreviewing={isLivePreviewing}
             isRecording={recordingStatus === 'recording'}
+            isRealtimeTranscriptionEnabled={recorderSettings.liveTranscriptionEnabled}
+            canPlaySegments={Boolean(audioUrl && selectedSession && !draftSession)}
+            memoDisabled={isSaving || recordingStatus === 'recording'}
+            playingSegmentId={playingSegmentId}
             previewProgress={livePreviewProgress}
             session={activeSession}
+            onPlaySegment={handlePlaySegment}
+            onSegmentMemoChange={handleUpdateSegmentMemo}
             onExport={selectedSession && !draftSession ? handleExportTranscript : undefined}
           />
           <div className="sideStack">
@@ -490,6 +681,7 @@ export function App(): JSX.Element {
             <SpeakerEditor disabled={!activeSession || isSaving} session={activeSession} onRename={handleRenameSpeaker} />
           </div>
         </section>
+        <audio ref={audioRef} src={audioUrl ?? undefined} onEnded={() => setPlayingSegmentId(null)} />
       </main>
     </div>
   );

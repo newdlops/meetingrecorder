@@ -18,8 +18,15 @@ body {
   background: #eef2f3;
 }
 
+html,
+body,
+#root {
+  height: 100%;
+}
+
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
@@ -30,6 +37,7 @@ button {
 
 button:disabled,
 input:disabled,
+select:disabled,
 textarea:disabled {
   cursor: not-allowed;
   opacity: 0.58;
@@ -38,14 +46,18 @@ textarea:disabled {
 .appShell {
   display: grid;
   grid-template-columns: 320px minmax(0, 1fr);
-  min-height: 100vh;
+  height: 100vh;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .sidebar {
   display: flex;
   flex-direction: column;
   gap: 24px;
+  min-height: 0;
   padding: 28px 18px;
+  overflow: hidden;
   background: #f9fbfb;
   border-right: 1px solid #d9e2e4;
 }
@@ -150,6 +162,8 @@ textarea:disabled {
   flex-direction: column;
   gap: 20px;
   min-width: 0;
+  min-height: 0;
+  overflow: auto;
   padding: 28px;
 }
 
@@ -203,24 +217,36 @@ textarea:disabled {
 }
 
 .recorderControls {
-  display: grid;
-  grid-column: 1 / -1;
-  grid-template-columns: minmax(180px, 1fr) auto minmax(120px, 180px);
-  gap: 14px;
-  align-items: center;
-  padding-top: 4px;
+  display: grid; grid-column: 1 / -1;
+  grid-template-columns: auto minmax(180px, 1fr) auto auto auto minmax(120px, 180px);
+  gap: 14px; align-items: center; padding-top: 4px;
+}
+
+.sourceSegmentedControl {
+  display: inline-grid; grid-template-columns: repeat(2, minmax(86px, 1fr)); min-width: 188px;
+  padding: 3px; background: #eef3f4; border: 1px solid #d2dde0; border-radius: 8px;
+}
+
+.sourceSegmentedControl button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  min-height: 32px; padding: 0 10px; color: #526265; white-space: nowrap;
+  background: transparent; border: 0; border-radius: 6px; font-size: 13px; font-weight: 800;
+}
+
+.sourceSegmentedControl button.active {
+  color: #1f7a8c; background: #ffffff; box-shadow: 0 1px 3px rgba(31, 122, 140, 0.16);
 }
 
 .sensitivityControl {
-  display: grid;
-  grid-template-columns: 112px minmax(0, 1fr);
-  gap: 10px;
-  align-items: center;
-  min-width: 0;
+  display: grid; grid-template-columns: 112px minmax(0, 1fr);
+  gap: 10px; align-items: center; min-width: 0;
 }
 
 .sensitivityControl span,
-.distantSpeechToggle {
+.distantSpeechToggle,
+.speakerCountControl,
+.speakerCountControl span,
+.liveTranscriptToggle {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -229,11 +255,26 @@ textarea:disabled {
   font-weight: 700;
 }
 
+.speakerCountControl {
+  gap: 8px;
+  white-space: nowrap;
+}
+
+.speakerCountControl select {
+  min-height: 32px;
+  padding: 0 28px 0 10px;
+  color: #263234;
+  background: #ffffff;
+  border: 1px solid #c9d8db;
+  border-radius: 8px;
+}
+
 .sensitivityControl input {
   width: 100%;
 }
 
-.distantSpeechToggle input {
+.distantSpeechToggle input,
+.liveTranscriptToggle input {
   width: 16px;
   height: 16px;
 }
@@ -405,9 +446,57 @@ textarea:disabled {
   border-radius: 999px;
 }
 
+.segmentPlayButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  margin-left: auto;
+  padding: 0;
+  color: #1f7a8c;
+  background: #ffffff;
+  border: 1px solid #c9d8db;
+  border-radius: 8px;
+}
+
+.segmentPlayButton.active {
+  color: #ffffff;
+  background: #1f7a8c;
+  border-color: #1f7a8c;
+}
+
 .transcriptSegment p {
   color: #263234;
   line-height: 1.55;
+}
+
+.segmentMemoInput {
+  width: 100%;
+  min-height: 64px;
+  margin-top: 10px;
+  padding: 9px 10px;
+  resize: vertical;
+  color: #263234;
+  background: #ffffff;
+  border: 1px solid #d4e0e2;
+  border-radius: 8px;
+}
+
+.segmentMemoInput:focus {
+  outline: 2px solid rgba(31, 122, 140, 0.22);
+  border-color: #1f7a8c;
+}
+
+.syllableText {
+  word-break: keep-all;
+}
+
+.syllableUnit {
+  display: inline-block;
+  opacity: 0;
+  transform: translateY(2px);
+  animation: syllableReveal 180ms ease-out forwards;
 }
 
 .speakerList {
@@ -458,6 +547,13 @@ textarea:disabled {
   }
 }
 
+@keyframes syllableReveal {
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @media (max-width: 980px) {
   body {
     min-width: 0;
@@ -465,9 +561,13 @@ textarea:disabled {
 
   .appShell {
     grid-template-columns: 1fr;
+    height: auto;
+    min-height: 100vh;
+    overflow: visible;
   }
 
   .sidebar {
+    min-height: 0;
     max-height: 280px;
     border-right: 0;
     border-bottom: 1px solid #d9e2e4;

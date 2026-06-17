@@ -11,6 +11,8 @@ export interface OfflineTranscriptionPayload {
 export interface TranscribeRecordedAudioOptions {
   mode?: OfflineTranscriptionMode;
   includeAudioData?: boolean;
+  minSpeakers?: number;
+  maxSpeakers?: number;
 }
 
 // 녹음된 오디오를 메인 프로세스의 로컬 전사 엔진으로 보내고 결과를 받는다.
@@ -27,14 +29,20 @@ export async function transcribeRecordedAudio(
   let audioData: Uint8Array | undefined;
 
   try {
-    const audioBuffer = await recordedAudio.blob.arrayBuffer();
-    audioData = new Uint8Array(audioBuffer);
+    if (recordedAudio.blob) {
+      const audioBuffer = await recordedAudio.blob.arrayBuffer();
+      audioData = new Uint8Array(audioBuffer);
+    }
 
     const result = await window.meetingRecorder.transcribeOffline({
       sessionId,
       audioData,
+      audioRecordingId: recordedAudio.recordingId,
       audioMimeType: recordedAudio.mimeType,
-      mode: options.mode ?? 'final'
+      audioDurationMs: recordedAudio.durationMs,
+      mode: options.mode ?? 'final',
+      minSpeakers: options.minSpeakers,
+      maxSpeakers: options.maxSpeakers
     });
 
     return { audioData: shouldIncludeAudioData ? audioData : undefined, result };

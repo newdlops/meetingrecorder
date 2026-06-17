@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.meetingrecorder.system-audio-recorder</string>
+  <key>CFBundleName</key>
+  <string>Meeting Recorder System Audio</string>
+  <key>CFBundleDisplayName</key>
+  <string>Meeting Recorder System Audio</string>
+  <key>CFBundleExecutable</key>
+  <string>SystemAudioRecorder</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>0.1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+  <key>LSUIElement</key>
+  <true/>
+  <key>NSAudioCaptureUsageDescription</key>
+  <string>영상 자료의 시스템 오디오를 녹음해 회의록 전사 품질을 테스트합니다.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>시스템 오디오 테스트 중 오디오 캡처 권한 확인을 위해 사용됩니다.</string>
+</dict>
+</plist>

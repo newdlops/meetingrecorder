@@ -1,23 +1,30 @@
 import { app } from 'electron';
+import { spawn } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import ffmpegPath from 'ffmpeg-static';
-import type { OfflineTranscriptionRequest, OfflineTranscriptionResult } from '../shared/types';
+import type { OfflineTranscriptionRequest, OfflineTranscriptionResult, TranscriptSegment } from '../shared/types';
 import { PersistentTranscriptionWorker, type ProgressCallback } from './persistentTranscriptionWorker';
+import type { RecordingFileService } from './recordingFileService';
 
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 const DEFAULT_STT_LANGUAGE = 'ko';
 const DEFAULT_STT_TASK = 'transcribe';
 const DEFAULT_PREVIEW_BATCH_SIZE = '2';
 const DEFAULT_PERSISTENT_THREAD_COUNT = '2';
+const DEFAULT_FINAL_CHUNK_MS = 10 * 60 * 1000;
+const SINGLE_PASS_CHUNK_COUNT = 1;
 
 // WhisperX 기반 Python 상주 worker를 통해 오프라인 전사/화자분리 결과를 만든다.
 export class LocalTranscriptionService {
   private persistentWorker?: PersistentTranscriptionWorker;
 
-  constructor(private readonly appRoot = app.getAppPath()) {}
+  constructor(
+    private readonly appRoot = app.getAppPath(),
+    private readonly recordingFileService?: RecordingFileService
+  ) {}
 
   // 앱 시작 후 백그라운드에서 모델을 미리 올린다.
   async warmUp(): Promise<void> {
@@ -34,26 +41,217 @@ export class LocalTranscriptionService {
     request: OfflineTranscriptionRequest,
     onProgress?: ProgressCallback
   ): Promise<OfflineTranscriptionResult> {
+    const isPreviewRequest = request.mode === 'preview';
+
+    if (request.audioRecordingId && !isPreviewRequest) {
+      if (!this.recordingFileService) {
+        throw new Error('녹음 파일 서비스가 준비되지 않았습니다.');
+      }
+
+      const recordingFile = this.recordingFileService.getCompletedFile(request.audioRecordingId);
+      return this.transcribeAudioFile(
+        {
+          ...request,
+          audioData: undefined,
+          audioDurationMs: request.audioDurationMs ?? recordingFile.durationMs
+        },
+        recordingFile.filePath,
+        false,
+        onProgress
+      );
+    }
+
+    if (!request.audioData) {
+      throw new Error('전사할 오디오 데이터가 없습니다.');
+    }
+
     const tempDirectory = await mkdtemp(path.join(tmpdir(), 'meeting-recorder-'));
     const audioPath = path.join(tempDirectory, this.getAudioFileName(request.audioMimeType));
-    const isPreviewRequest = request.mode === 'preview';
 
     try {
       await writeFile(audioPath, Buffer.from(request.audioData));
-      return await this.getPersistentWorker().transcribe(
-        {
-          request,
-          audioPath,
-          transcribeOnly: isPreviewRequest,
-          batchSize: this.getBatchSize(isPreviewRequest),
-          minSpeakers: request.minSpeakers,
-          maxSpeakers: request.maxSpeakers
-        },
-        onProgress
-      );
+      return await this.transcribeAudioFile(request, audioPath, isPreviewRequest, onProgress);
     } finally {
       await rm(tempDirectory, { recursive: true, force: true });
     }
+  }
+
+  private async transcribeAudioFile(
+    request: OfflineTranscriptionRequest,
+    audioPath: string,
+    isPreviewRequest: boolean,
+    onProgress?: ProgressCallback
+  ): Promise<OfflineTranscriptionResult> {
+    if (!isPreviewRequest && this.shouldUseChunkedFinalTranscription(request)) {
+      return this.transcribeFinalAudioInChunks(request, audioPath, onProgress);
+    }
+
+    return this.getPersistentWorker().transcribe(
+      {
+        request,
+        audioPath,
+        transcribeOnly: isPreviewRequest,
+        batchSize: this.getBatchSize(isPreviewRequest),
+        minSpeakers: request.minSpeakers,
+        maxSpeakers: request.maxSpeakers
+      },
+      onProgress
+    );
+  }
+
+  private shouldUseChunkedFinalTranscription(request: OfflineTranscriptionRequest): boolean {
+    const durationMs = request.audioDurationMs ?? 0;
+    const chunkMs = this.getFinalChunkMs();
+
+    return chunkMs > 0 && durationMs > chunkMs * SINGLE_PASS_CHUNK_COUNT;
+  }
+
+  private async transcribeFinalAudioInChunks(
+    request: OfflineTranscriptionRequest,
+    audioPath: string,
+    onProgress?: ProgressCallback
+  ): Promise<OfflineTranscriptionResult> {
+    const chunkMs = this.getFinalChunkMs();
+    const durationMs = Math.max(request.audioDurationMs ?? chunkMs, chunkMs);
+    const chunkCount = Math.max(1, Math.ceil(durationMs / chunkMs));
+    const chunkDirectory = await mkdtemp(path.join(tmpdir(), 'meeting-recorder-final-chunks-'));
+    const segments: TranscriptSegment[] = [];
+    const speakers = new Map<string, OfflineTranscriptionResult['speakers'][number]>();
+    let language: string | undefined;
+
+    try {
+      for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
+        const chunkStartMs = chunkIndex * chunkMs;
+        const chunkDurationMs = Math.min(chunkMs, durationMs - chunkStartMs);
+        const chunkPath = path.join(chunkDirectory, `chunk-${String(chunkIndex + 1).padStart(4, '0')}.wav`);
+
+        onProgress?.({
+          sessionId: request.sessionId,
+          mode: 'final',
+          stage: 'audio',
+          progress: this.mapChunkProgress(chunkIndex, chunkCount, 0),
+          message: `오디오 구간 준비 중 (${chunkIndex + 1}/${chunkCount})`
+        });
+        await this.extractAudioChunk(audioPath, chunkPath, chunkStartMs, chunkDurationMs);
+
+        const chunkRequest: OfflineTranscriptionRequest = {
+          ...request,
+          audioData: undefined,
+          audioRecordingId: undefined,
+          audioMimeType: 'audio/wav',
+          audioDurationMs: chunkDurationMs
+        };
+        const chunkResult = await this.getPersistentWorker().transcribe(
+          {
+            request: chunkRequest,
+            audioPath: chunkPath,
+            transcribeOnly: false,
+            batchSize: this.getBatchSize(false),
+            minSpeakers: request.minSpeakers,
+            maxSpeakers: request.maxSpeakers
+          },
+          (progress) => {
+            onProgress?.({
+              ...progress,
+              progress: this.mapChunkProgress(chunkIndex, chunkCount, progress.progress),
+              message: `구간 ${chunkIndex + 1}/${chunkCount} · ${progress.message}`
+            });
+          }
+        );
+
+        language = language ?? chunkResult.language;
+        for (const speaker of chunkResult.speakers) {
+          if (!speakers.has(speaker.id)) {
+            speakers.set(speaker.id, speaker);
+          }
+        }
+
+        for (const segment of chunkResult.segments) {
+          segments.push({
+            ...segment,
+            id: `segment-${segments.length + 1}`,
+            startMs: chunkStartMs + segment.startMs,
+            endMs: chunkStartMs + segment.endMs
+          });
+        }
+      }
+
+      onProgress?.({
+        sessionId: request.sessionId,
+        mode: 'final',
+        stage: 'done',
+        progress: 100,
+        message: '전사 완료'
+      });
+
+      return {
+        engineName: 'whisperx-sherpa-onnx-local-chunked',
+        language,
+        durationMs,
+        speakers: [...speakers.values()],
+        segments
+      };
+    } finally {
+      await rm(chunkDirectory, { recursive: true, force: true });
+    }
+  }
+
+  private mapChunkProgress(chunkIndex: number, chunkCount: number, chunkProgress: number): number {
+    const completedWeight = chunkIndex / chunkCount;
+    const currentWeight = Math.max(0, Math.min(100, chunkProgress)) / 100 / chunkCount;
+    return Math.min(98, Math.round((completedWeight + currentWeight) * 98));
+  }
+
+  private async extractAudioChunk(
+    inputPath: string,
+    outputPath: string,
+    startMs: number,
+    durationMs: number
+  ): Promise<void> {
+    const ffmpegBinary = this.getFfmpegPath();
+    const args = [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-nostdin',
+      '-y',
+      '-ss',
+      (startMs / 1000).toFixed(3),
+      '-t',
+      (durationMs / 1000).toFixed(3),
+      '-i',
+      inputPath,
+      '-vn',
+      '-ac',
+      '1',
+      '-ar',
+      '16000',
+      '-threads',
+      '1',
+      outputPath
+    ];
+
+    await this.runProcess(ffmpegBinary, args);
+  }
+
+  private async runProcess(command: string, args: string[]): Promise<void> {
+    await new Promise<void>((resolve, reject) => {
+      const child = spawn(command, args, { stdio: ['ignore', 'ignore', 'pipe'] });
+      let stderr = '';
+
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr = `${stderr}${chunk.toString('utf-8')}`.slice(-4000);
+      });
+      child.on('error', reject);
+      child.on('close', (code) => {
+        if (code === 0) {
+          resolve();
+          return;
+        }
+
+        reject(new Error(stderr.trim() || `오디오 구간 추출에 실패했습니다. 코드: ${code ?? 'unknown'}`));
+      });
+    });
   }
 
   // 상주 worker 인스턴스를 지연 생성해 같은 Python 프로세스를 계속 재사용한다.
@@ -95,6 +293,9 @@ export class LocalTranscriptionService {
     ];
 
     this.appendOptionalArg(args, '--threads', this.getPersistentThreadCount());
+    this.appendOptionalArg(args, '--cluster-threshold', process.env.MEETING_RECORDER_DIARIZATION_CLUSTER_THRESHOLD);
+    this.appendOptionalArg(args, '--diarization-min-turn-ms', process.env.MEETING_RECORDER_DIARIZATION_MIN_TURN_MS);
+    this.appendOptionalArg(args, '--diarization-merge-gap-ms', process.env.MEETING_RECORDER_DIARIZATION_MERGE_GAP_MS);
     this.appendOptionalArg(args, '--no-speech-threshold', process.env.MEETING_RECORDER_STT_NO_SPEECH_THRESHOLD);
     this.appendOptionalArg(args, '--log-prob-threshold', process.env.MEETING_RECORDER_STT_LOG_PROB_THRESHOLD);
     this.appendOptionalArg(
@@ -207,6 +408,20 @@ export class LocalTranscriptionService {
     return fallbackPaths.find((candidatePath) => existsSync(path.join(candidatePath, 'ffmpeg')));
   }
 
+  private getFfmpegPath(): string {
+    if (ffmpegPath && existsSync(ffmpegPath)) {
+      return ffmpegPath;
+    }
+
+    const ffmpegDirectory = this.getFfmpegDirectory();
+
+    if (ffmpegDirectory) {
+      return path.join(ffmpegDirectory, 'ffmpeg');
+    }
+
+    return 'ffmpeg';
+  }
+
   // 개발 중에는 repo 폴더, 패키징 후에는 resources 폴더의 모델 자산을 사용한다.
   private getEngineAssetRoot(): string {
     if (process.env.MEETING_RECORDER_ENGINE_ASSET_ROOT) {
@@ -257,5 +472,15 @@ export class LocalTranscriptionService {
   // 녹음 중 미리보기 부하를 고려해 상주 모델의 CPU 스레드 수를 보수적으로 둔다.
   private getPersistentThreadCount(): string | undefined {
     return process.env.MEETING_RECORDER_STT_THREADS ?? DEFAULT_PERSISTENT_THREAD_COUNT;
+  }
+
+  private getFinalChunkMs(): number {
+    const rawValue = Number(process.env.MEETING_RECORDER_STT_FINAL_CHUNK_MS ?? DEFAULT_FINAL_CHUNK_MS);
+
+    if (!Number.isFinite(rawValue)) {
+      return DEFAULT_FINAL_CHUNK_MS;
+    }
+
+    return Math.max(0, Math.round(rawValue));
   }
 }

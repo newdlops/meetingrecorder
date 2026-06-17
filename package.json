@@ -6,7 +6,10 @@
   "main": "dist/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
-    "build": "tsc --noEmit && electron-vite build",
+    "dev:mock-system-audio": "MEETING_RECORDER_SYSTEM_AUDIO_MODE=mock electron-vite dev",
+    "reset:system-audio-permission": "node scripts/reset-system-audio-permission.mjs",
+    "build:system-audio": "node scripts/build-system-audio-recorder.mjs",
+    "build": "npm run build:system-audio && tsc --noEmit && electron-vite build",
     "dist": "npm run build && electron-builder",
     "dist:dir": "npm run build && electron-builder --dir",
     "preview": "electron-vite preview",
@@ -57,11 +60,19 @@
       {
         "from": ".venv-stt",
         "to": ".venv-stt"
+      },
+      {
+        "from": "native/macos-system-audio-recorder/build/SystemAudioRecorder.app",
+        "to": "native/SystemAudioRecorder.app"
       }
     ],
     "mac": {
       "target": ["dmg", "zip"],
-      "category": "public.app-category.productivity"
+      "category": "public.app-category.productivity",
+      "extendInfo": {
+        "NSAudioCaptureUsageDescription": "영상 자료의 시스템 오디오를 녹음해 회의록 전사 품질을 테스트합니다.",
+        "NSMicrophoneUsageDescription": "회의 음성을 녹음하고 오프라인으로 전사하기 위해 마이크를 사용합니다."
+      }
     }
   }
 }

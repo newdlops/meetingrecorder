@@ -6,6 +6,7 @@ import type {
   MeetingSession,
   MeetingSessionSummary,
   SaveMeetingSessionRequest,
+  SegmentMemoUpdateRequest,
   SessionDetailsUpdateRequest,
   SpeakerUpdateRequest
 } from '../shared/types';
@@ -48,7 +49,7 @@ export class MeetingSessionStore {
   }
 
   // 회의 JSON, 오디오 파일, 텍스트 스냅샷을 함께 저장한다.
-  async saveSession(request: SaveMeetingSessionRequest): Promise<MeetingSession> {
+  async saveSession(request: SaveMeetingSessionRequest, audioFilePath?: string): Promise<MeetingSession> {
     const session = request.session;
     assertSafeSessionId(session.id);
 
@@ -57,10 +58,15 @@ export class MeetingSessionStore {
 
     const normalizedSession = normalizeSession({
       ...session,
-      audioFileName: request.audioData ? AUDIO_FILE_NAME : session.audioFileName,
+      audioFileName: request.audioData || audioFilePath ? AUDIO_FILE_NAME : session.audioFileName,
       audioMimeType: request.audioMimeType ?? session.audioMimeType,
       updatedAt: new Date().toISOString()
     });
+
+    if (audioFilePath) {
+      const audioPath = path.join(sessionDirectory, AUDIO_FILE_NAME);
+      await copyFile(audioFilePath, audioPath);
+    }
 
     if (request.audioData) {
       const audioPath = path.join(sessionDirectory, AUDIO_FILE_NAME);
@@ -114,6 +120,27 @@ export class MeetingSessionStore {
       title: title || session.title,
       transcriptText: request.transcriptText ?? session.transcriptText,
       memo: request.memo ?? session.memo,
+      updatedAt: new Date().toISOString()
+    };
+
+    await this.writeSession(updatedSession);
+    return updatedSession;
+  }
+
+  // 전사 문장 하나에 연결된 메모를 저장한다.
+  async updateSegmentMemo(request: SegmentMemoUpdateRequest): Promise<MeetingSession> {
+    assertSafeSessionId(request.sessionId);
+    const session = await this.readSession(request.sessionId);
+
+    if (!session) {
+      throw new Error('회의 세션을 찾을 수 없습니다.');
+    }
+
+    const updatedSession: MeetingSession = {
+      ...session,
+      segments: session.segments.map((segment) =>
+        segment.id === request.segmentId ? { ...segment, memo: request.memo } : segment
+      ),
       updatedAt: new Date().toISOString()
     };
 
@@ -221,6 +248,7 @@ function toSummary(session: MeetingSession): MeetingSessionSummary {
 function normalizeSession(session: MeetingSession): MeetingSession {
   const normalizedSession = {
     ...session,
+    segments: (session.segments ?? []).map((segment) => ({ ...segment, memo: segment.memo ?? '' })),
     memo: session.memo ?? '',
     transcriptText: session.transcriptText ?? ''
   };

@@ -1,9 +1,15 @@
 import { dialog, ipcMain } from 'electron';
 import type { LocalTranscriptionService } from './localTranscriptionService';
+import type { RecordingFileService } from './recordingFileService';
 import type { MeetingSessionStore } from './sessionStore';
+import type { SystemAudioCaptureService } from './systemAudioCaptureService';
 import type {
   OfflineTranscriptionRequest,
+  RecordingChunkAppendRequest,
+  RecordingFileCompleteRequest,
+  RecordingFileStartRequest,
   SaveMeetingSessionRequest,
+  SegmentMemoUpdateRequest,
   SessionDetailsUpdateRequest,
   SpeakerUpdateRequest
 } from '../shared/types';
@@ -11,15 +17,26 @@ import type {
 // 렌더러와 메인 프로세스 사이의 IPC 엔드포인트를 등록한다.
 export function registerIpcHandlers(
   store: MeetingSessionStore,
-  transcriptionService: LocalTranscriptionService
+  transcriptionService: LocalTranscriptionService,
+  recordingFileService: RecordingFileService,
+  systemAudioCaptureService: SystemAudioCaptureService
 ): void {
   ipcMain.handle('session:list', async () => store.listSessions());
 
   ipcMain.handle('session:get', async (_event, id: string) => store.getSession(id));
 
-  ipcMain.handle('session:save', async (_event, request: SaveMeetingSessionRequest) =>
-    store.saveSession(request)
-  );
+  ipcMain.handle('session:save', async (_event, request: SaveMeetingSessionRequest) => {
+    const audioFilePath = request.audioRecordingId
+      ? recordingFileService.getCompletedFile(request.audioRecordingId).filePath
+      : undefined;
+    const savedSession = await store.saveSession(request, audioFilePath);
+
+    if (request.audioRecordingId) {
+      await recordingFileService.discard(request.audioRecordingId);
+    }
+
+    return savedSession;
+  });
 
   ipcMain.handle('session:update-speaker', async (_event, request: SpeakerUpdateRequest) =>
     store.updateSpeakerName(request)
@@ -27,6 +44,10 @@ export function registerIpcHandlers(
 
   ipcMain.handle('session:update-details', async (_event, request: SessionDetailsUpdateRequest) =>
     store.updateSessionDetails(request)
+  );
+
+  ipcMain.handle('session:update-segment-memo', async (_event, request: SegmentMemoUpdateRequest) =>
+    store.updateSegmentMemo(request)
   );
 
   ipcMain.handle('session:get-audio', async (_event, sessionId: string) => store.getAudioFile(sessionId));
@@ -64,6 +85,40 @@ export function registerIpcHandlers(
     await store.exportTranscript(sessionId, result.filePath);
     return { canceled: false, filePath: result.filePath };
   });
+
+  ipcMain.handle('recording-file:start', async (_event, request: RecordingFileStartRequest) =>
+    recordingFileService.start(request)
+  );
+
+  ipcMain.handle('recording-file:append', async (_event, request: RecordingChunkAppendRequest) =>
+    recordingFileService.appendChunk(request)
+  );
+
+  ipcMain.handle('recording-file:complete', async (_event, request: RecordingFileCompleteRequest) =>
+    recordingFileService.complete(request)
+  );
+
+  ipcMain.handle('recording-file:discard', async (_event, recordingId: string) =>
+    recordingFileService.discard(recordingId)
+  );
+
+  ipcMain.handle('system-audio:start', async () => systemAudioCaptureService.start());
+
+  ipcMain.handle('system-audio:stop', async () => systemAudioCaptureService.stop());
+
+  ipcMain.handle('system-audio:stop-to-recording-file', async (_event, recordingId: string) => {
+    const outputPath = recordingFileService.getActiveFilePath(recordingId);
+    const result = await systemAudioCaptureService.stopToFile(outputPath);
+    return recordingFileService.complete({
+      recordingId,
+      audioMimeType: result.audioMimeType,
+      durationMs: result.durationMs
+    });
+  });
+
+  ipcMain.handle('system-audio:snapshot', async () => systemAudioCaptureService.createSnapshot());
+
+  ipcMain.handle('system-audio:reset-snapshot', async () => systemAudioCaptureService.resetSnapshot());
 
   ipcMain.handle('transcription:offline', async (event, request: OfflineTranscriptionRequest) =>
     transcriptionService.transcribe(request, (progress) => {

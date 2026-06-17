@@ -10,6 +10,8 @@ from typing import Any
 
 SPEAKER_COLORS = ["#1f7a8c", "#b45f06", "#4f6f52", "#6d597a", "#607d8b", "#8a5a44"]
 _DIARIZER_CACHE: dict[tuple[str, str, int, float], Any] = {}
+DEFAULT_DIARIZATION_MIN_TURN_MS = 650.0
+DEFAULT_DIARIZATION_MERGE_GAP_MS = 300.0
 
 
 @dataclass(frozen=True)
@@ -48,7 +50,7 @@ def diarize_audio(audio: Any, args: argparse.Namespace) -> list[DiarizedTurn]:
 
     if diarizer:
         result = diarizer.process(audio).sort_by_start_time()
-        return build_turns(result)
+        return smooth_turns(build_turns(result), args)
 
     config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
         segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
@@ -71,7 +73,7 @@ def diarize_audio(audio: Any, args: argparse.Namespace) -> list[DiarizedTurn]:
     diarizer = sherpa_onnx.OfflineSpeakerDiarization(config)
     _DIARIZER_CACHE[cache_key] = diarizer
     result = diarizer.process(audio).sort_by_start_time()
-    return build_turns(result)
+    return smooth_turns(build_turns(result), args)
 
 
 def build_turns(result: Any) -> list[DiarizedTurn]:
@@ -85,6 +87,154 @@ def build_turns(result: Any) -> list[DiarizedTurn]:
         )
         for segment in result
     ]
+
+
+def smooth_turns(turns: list[DiarizedTurn], args: argparse.Namespace) -> list[DiarizedTurn]:
+    """짧게 튀는 화자 구간을 주변 문맥으로 보정해 단어 단위 화자 흔들림을 줄인다."""
+
+    merge_gap = resolve_merge_gap_seconds(args)
+    normalized_turns = merge_adjacent_same_speaker(
+        sorted((turn for turn in turns if turn.end > turn.start), key=lambda turn: (turn.start, turn.end)),
+        merge_gap,
+    )
+    min_duration = resolve_min_turn_seconds(args)
+
+    if min_duration <= 0 or len(normalized_turns) < 3:
+        return normalized_turns
+
+    smoothed_turns: list[DiarizedTurn] = []
+
+    for index, turn in enumerate(normalized_turns):
+        previous_turn = smoothed_turns[-1] if smoothed_turns else None
+        next_turn = normalized_turns[index + 1] if index + 1 < len(normalized_turns) else None
+        replacement_label = choose_replacement_label(turn, previous_turn, next_turn, min_duration, merge_gap)
+        next_turn = DiarizedTurn(start=turn.start, end=turn.end, speaker_label=replacement_label)
+
+        if smoothed_turns and smoothed_turns[-1].speaker_label == next_turn.speaker_label:
+            previous = smoothed_turns[-1]
+            smoothed_turns[-1] = DiarizedTurn(
+                start=previous.start,
+                end=max(previous.end, next_turn.end),
+                speaker_label=previous.speaker_label,
+            )
+            continue
+
+        smoothed_turns.append(next_turn)
+
+    return merge_adjacent_same_speaker(smoothed_turns, merge_gap)
+
+
+def choose_replacement_label(
+    turn: DiarizedTurn,
+    previous_turn: DiarizedTurn | None,
+    next_turn: DiarizedTurn | None,
+    min_duration: float,
+    merge_gap: float,
+) -> str:
+    """짧은 구간이 앞뒤의 같은 긴 화자 사이에 끼었거나 겹쳐 있으면 주변 화자로 흡수한다."""
+
+    duration = turn.end - turn.start
+
+    if duration >= min_duration:
+        return turn.speaker_label
+
+    if (
+        previous_turn
+        and next_turn
+        and previous_turn.speaker_label == next_turn.speaker_label
+        and gap_between(previous_turn, turn) <= merge_gap
+        and gap_between(turn, next_turn) <= merge_gap
+    ):
+        return previous_turn.speaker_label
+
+    previous_overlap = overlap_seconds(previous_turn, turn) if previous_turn else 0.0
+    next_overlap = overlap_seconds(next_turn, turn) if next_turn else 0.0
+    overlap_floor = max(0.05, duration * 0.5)
+
+    if previous_turn and previous_overlap >= overlap_floor and turn_duration(previous_turn) >= min_duration:
+        return previous_turn.speaker_label
+
+    if next_turn and next_overlap >= overlap_floor and turn_duration(next_turn) >= min_duration:
+        return next_turn.speaker_label
+
+    if duration >= min_duration * 0.5:
+        return turn.speaker_label
+
+    adjacent_candidates = [
+        candidate
+        for candidate in (previous_turn, next_turn)
+        if candidate and turn_duration(candidate) >= min_duration and abs(gap_between(candidate, turn)) <= merge_gap
+    ]
+
+    if not adjacent_candidates:
+        return turn.speaker_label
+
+    nearest_turn = min(
+        adjacent_candidates,
+        key=lambda candidate: abs(((candidate.start + candidate.end) / 2) - ((turn.start + turn.end) / 2)),
+    )
+    return nearest_turn.speaker_label
+
+
+def merge_adjacent_same_speaker(turns: list[DiarizedTurn], max_gap: float) -> list[DiarizedTurn]:
+    """인접한 같은 화자 턴은 작은 공백까지 같은 발화로 합친다."""
+
+    merged_turns: list[DiarizedTurn] = []
+
+    for turn in turns:
+        if not merged_turns:
+            merged_turns.append(turn)
+            continue
+
+        previous = merged_turns[-1]
+
+        if previous.speaker_label == turn.speaker_label and turn.start - previous.end <= max_gap:
+            merged_turns[-1] = DiarizedTurn(
+                start=previous.start,
+                end=max(previous.end, turn.end),
+                speaker_label=previous.speaker_label,
+            )
+            continue
+
+        merged_turns.append(turn)
+
+    return merged_turns
+
+
+def resolve_min_turn_seconds(args: argparse.Namespace) -> float:
+    """짧은 튐 보정 기준을 초 단위로 계산한다."""
+
+    return max(0.0, float(getattr(args, "diarization_min_turn_ms", DEFAULT_DIARIZATION_MIN_TURN_MS)) / 1000)
+
+
+def resolve_merge_gap_seconds(args: argparse.Namespace) -> float:
+    """같은 화자 턴을 합칠 수 있는 최대 공백을 초 단위로 계산한다."""
+
+    return max(0.0, float(getattr(args, "diarization_merge_gap_ms", DEFAULT_DIARIZATION_MERGE_GAP_MS)) / 1000)
+
+
+def turn_duration(turn: DiarizedTurn) -> float:
+    """화자 턴 길이를 초 단위로 반환한다."""
+
+    return max(0.0, turn.end - turn.start)
+
+
+def overlap_seconds(left: DiarizedTurn | None, right: DiarizedTurn | None) -> float:
+    """두 화자 턴이 겹치는 시간을 초 단위로 계산한다."""
+
+    if not left or not right:
+        return 0.0
+
+    return max(0.0, min(left.end, right.end) - max(left.start, right.start))
+
+
+def gap_between(left: DiarizedTurn, right: DiarizedTurn) -> float:
+    """두 구간 사이의 공백을 계산한다. 겹치면 음수 값이 된다."""
+
+    if left.start <= right.start:
+        return right.start - left.end
+
+    return left.start - right.end
 
 
 def resolve_num_clusters(args: argparse.Namespace) -> int:

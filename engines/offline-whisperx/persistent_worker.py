@@ -13,6 +13,8 @@ from typing import Any
 from diarization import diarize_audio
 from worker import (
     DEFAULT_CLUSTER_THRESHOLD,
+    DEFAULT_DIARIZATION_MERGE_GAP_MS,
+    DEFAULT_DIARIZATION_MIN_TURN_MS,
     DEFAULT_LANGUAGE,
     DEFAULT_TASK,
     build_asr_options,
@@ -50,6 +52,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--diarization-embedding-model", help="sherpa-onnx speaker embedding ONNX 경로")
     parser.add_argument("--num-speakers", type=int, default=-1, help="알고 있는 화자 수. 모르면 -1")
     parser.add_argument("--cluster-threshold", type=float, default=DEFAULT_CLUSTER_THRESHOLD, help="화자 클러스터링 임계값")
+    parser.add_argument(
+        "--diarization-min-turn-ms",
+        type=float,
+        default=DEFAULT_DIARIZATION_MIN_TURN_MS,
+        help="이 길이보다 짧은 화자 턴은 주변 문맥으로 보정",
+    )
+    parser.add_argument(
+        "--diarization-merge-gap-ms",
+        type=float,
+        default=DEFAULT_DIARIZATION_MERGE_GAP_MS,
+        help="같은 화자 턴을 합칠 최대 공백",
+    )
     parser.add_argument("--threads", type=int, help="CPU 추론 스레드 수")
     parser.add_argument("--no-speech-threshold", type=float, default=0.5, help="무음으로 판단할 no-speech 확률 기준")
     parser.add_argument("--log-prob-threshold", type=float, default=-0.9, help="낮은 신뢰도 전사를 버릴 로그 확률 기준")

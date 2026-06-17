@@ -18,10 +18,14 @@ export function buildTranscriptText(session: MeetingSession): string {
 export function formatTranscriptDocument(session: MeetingSession): string {
   const transcriptText = (session.transcriptText || buildTranscriptText(session)).trim();
   const memo = session.memo.trim();
+  const segmentMemos = session.segments
+    .filter((segment) => segment.memo?.trim())
+    .map((segment) => `- [${formatTranscriptTime(segment.startMs)}] ${segment.memo?.trim()}`);
   const header = [`# ${session.title}`, `생성: ${session.createdAt}`, `수정: ${session.updatedAt}`, ''];
   const memoBlock = memo ? ['', '## 메모', memo] : [];
+  const segmentMemoBlock = segmentMemos.length > 0 ? ['', '## 문장 메모', ...segmentMemos] : [];
 
-  return [...header, transcriptText, ...memoBlock, ''].join('\n');
+  return [...header, transcriptText, ...memoBlock, ...segmentMemoBlock, ''].join('\n');
 }
 
 // 밀리초 시간을 텍스트 회의록용 mm:ss 형식으로 바꾼다.

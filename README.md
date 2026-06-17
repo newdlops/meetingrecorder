@@ -14,7 +14,20 @@
 
 ```bash
 npm install
+npm run build:system-audio
 npm run dev
+```
+
+시스템 오디오 권한 팝업 없이 UI와 전사 저장 흐름만 개발 테스트할 때는 mock 시스템 오디오 모드를 사용합니다.
+
+```bash
+npm run dev:mock-system-audio
+```
+
+macOS에서 시스템 오디오 캡처 권한을 실수로 거절했다면 아래 명령으로 개발용 헬퍼의 TCC 상태를 초기화한 뒤 앱을 다시 시작합니다.
+
+```bash
+npm run reset:system-audio-permission
 ```
 
 ## 오프라인 전사 엔진 준비

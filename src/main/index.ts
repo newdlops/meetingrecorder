@@ -2,10 +2,14 @@ import { app, BrowserWindow } from 'electron';
 import path from 'node:path';
 import { registerIpcHandlers } from './ipcHandlers';
 import { LocalTranscriptionService } from './localTranscriptionService';
+import { RecordingFileService } from './recordingFileService';
 import { MeetingSessionStore } from './sessionStore';
+import { SystemAudioCaptureService } from './systemAudioCaptureService';
 
 let mainWindow: BrowserWindow | null = null;
 let transcriptionService: LocalTranscriptionService | null = null;
+let recordingFileService: RecordingFileService | null = null;
+let systemAudioCaptureService: SystemAudioCaptureService | null = null;
 
 // Electron 창을 만들고 렌더러 진입점을 로드한다.
 function createMainWindow(): void {
@@ -36,9 +40,11 @@ function createMainWindow(): void {
 // 앱 데이터 폴더 아래에 회의 저장소를 만들고 IPC를 연결한다.
 async function bootstrap(): Promise<void> {
   const store = new MeetingSessionStore(path.join(app.getPath('userData'), 'meetings'));
-  transcriptionService = new LocalTranscriptionService();
+  recordingFileService = new RecordingFileService();
+  transcriptionService = new LocalTranscriptionService(undefined, recordingFileService);
+  systemAudioCaptureService = new SystemAudioCaptureService();
   await store.init();
-  registerIpcHandlers(store, transcriptionService);
+  registerIpcHandlers(store, transcriptionService, recordingFileService, systemAudioCaptureService);
   createMainWindow();
   transcriptionService.warmUp().catch((error) => console.error(error));
 }
@@ -59,4 +65,6 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   transcriptionService?.shutdown();
+  recordingFileService?.shutdown().catch((error) => console.error(error));
+  systemAudioCaptureService?.shutdown().catch((error) => console.error(error));
 });

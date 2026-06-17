@@ -14,6 +14,7 @@ export interface TranscriptSegment {
   startMs: number;
   endMs: number;
   text: string;
+  memo?: string;
   confidence: number;
   isOverlapped: boolean;
   overlapGroupId?: string;
@@ -47,6 +48,7 @@ export interface MeetingSessionSummary {
 export interface SaveMeetingSessionRequest {
   session: MeetingSession;
   audioData?: Uint8Array;
+  audioRecordingId?: string;
   audioMimeType?: string;
 }
 
@@ -63,6 +65,12 @@ export interface SessionDetailsUpdateRequest {
   memo?: string;
 }
 
+export interface SegmentMemoUpdateRequest {
+  sessionId: string;
+  segmentId: string;
+  memo: string;
+}
+
 export interface ExportTranscriptResult {
   canceled: boolean;
   filePath?: string;
@@ -72,6 +80,35 @@ export interface AudioFilePayload {
   fileName: string;
   audioMimeType?: string;
   audioData: Uint8Array;
+}
+
+export interface SystemAudioCaptureResult {
+  audioData?: Uint8Array;
+  audioMimeType: string;
+  durationMs: number;
+  startOffsetMs?: number;
+}
+
+export interface RecordingFileStartRequest {
+  recordingId: string;
+  audioMimeType: string;
+}
+
+export interface RecordingChunkAppendRequest {
+  recordingId: string;
+  audioData: Uint8Array;
+}
+
+export interface RecordingFileCompleteRequest {
+  recordingId: string;
+  audioMimeType: string;
+  durationMs: number;
+}
+
+export interface RecordingFileResult {
+  recordingId: string;
+  audioMimeType: string;
+  durationMs: number;
 }
 
 export interface DeleteSessionResult {
@@ -93,8 +130,10 @@ export type TranscriptionProgressStage =
 
 export interface OfflineTranscriptionRequest {
   sessionId: string;
-  audioData: Uint8Array;
+  audioData?: Uint8Array;
+  audioRecordingId?: string;
   audioMimeType: string;
+  audioDurationMs?: number;
   mode?: OfflineTranscriptionMode;
   minSpeakers?: number;
   maxSpeakers?: number;
@@ -122,10 +161,20 @@ export interface MeetingRecorderApi {
   saveSession(request: SaveMeetingSessionRequest): Promise<MeetingSession>;
   updateSpeakerName(request: SpeakerUpdateRequest): Promise<MeetingSession>;
   updateSessionDetails(request: SessionDetailsUpdateRequest): Promise<MeetingSession>;
+  updateSegmentMemo(request: SegmentMemoUpdateRequest): Promise<MeetingSession>;
   getAudioFile(sessionId: string): Promise<AudioFilePayload | null>;
   exportAudio(sessionId: string): Promise<ExportTranscriptResult>;
   deleteSession(sessionId: string): Promise<DeleteSessionResult>;
   exportTranscript(sessionId: string): Promise<ExportTranscriptResult>;
+  startRecordingFile(request: RecordingFileStartRequest): Promise<void>;
+  appendRecordingChunk(request: RecordingChunkAppendRequest): Promise<void>;
+  completeRecordingFile(request: RecordingFileCompleteRequest): Promise<RecordingFileResult>;
+  discardRecordingFile(recordingId: string): Promise<void>;
+  startSystemAudioCapture(): Promise<void>;
+  stopSystemAudioCapture(): Promise<SystemAudioCaptureResult>;
+  stopSystemAudioCaptureToRecordingFile(recordingId: string): Promise<RecordingFileResult>;
+  createSystemAudioSnapshot(): Promise<SystemAudioCaptureResult | null>;
+  resetSystemAudioSnapshot(): Promise<void>;
   transcribeOffline(request: OfflineTranscriptionRequest): Promise<OfflineTranscriptionResult>;
   onTranscriptionProgress(listener: (event: TranscriptionProgressEvent) => void): () => void;
 }
