@@ -22,6 +22,7 @@ interface CloseResult {
 interface BaseSystemAudioCapture {
   outputPath: string;
   tempDir: string;
+  ownsTempDir: boolean;
   startedAt: number;
   snapshotStartedAt: number;
 }
@@ -66,17 +67,22 @@ export class SystemAudioCaptureService {
   private activeCapture: ActiveSystemAudioCapture | null = null;
 
   // 시스템 오디오 녹음을 시작하고 헬퍼가 실제 캡처 준비를 마칠 때까지 기다린다.
-  async start(): Promise<void> {
+  async start(targetOutputPath?: string): Promise<void> {
     if (this.activeCapture) {
       throw new Error('이미 시스템 오디오 녹음이 진행 중입니다.');
     }
 
     if (this.shouldUseMockCapture()) {
-      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'meeting-recorder-system-audio-'));
+      const ownsTempDir = !targetOutputPath;
+      const tempDir = targetOutputPath
+        ? path.dirname(targetOutputPath)
+        : await fs.mkdtemp(path.join(os.tmpdir(), 'meeting-recorder-system-audio-'));
+      const outputPath = targetOutputPath ?? path.join(tempDir, 'system-audio.wav');
       this.activeCapture = {
         kind: 'mock',
-        outputPath: path.join(tempDir, 'system-audio.wav'),
+        outputPath,
         tempDir,
+        ownsTempDir,
         startedAt: Date.now(),
         snapshotStartedAt: Date.now()
       };
@@ -92,10 +98,15 @@ export class SystemAudioCaptureService {
       throw new Error('시스템 오디오 녹음 헬퍼가 없습니다. 앱을 다시 빌드하세요.');
     });
 
-    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'meeting-recorder-system-audio-'));
-    const outputPath = path.join(tempDir, 'system-audio.wav');
+    const ownsTempDir = !targetOutputPath;
+    const tempDir = targetOutputPath
+      ? path.dirname(targetOutputPath)
+      : await fs.mkdtemp(path.join(os.tmpdir(), 'meeting-recorder-system-audio-'));
+    const outputPath = targetOutputPath ?? path.join(tempDir, 'system-audio.wav');
+    await fs.mkdir(tempDir, { recursive: true });
+    await fs.rm(outputPath, { force: true }).catch(() => undefined);
     const child = spawn(helperPath, ['--output', outputPath], { stdio: ['pipe', 'pipe', 'pipe'] });
-    const capture = this.createCaptureSession(child, outputPath, tempDir);
+    const capture = this.createCaptureSession(child, outputPath, tempDir, ownsTempDir);
 
     this.activeCapture = capture;
     this.attachProcessListeners(capture);
@@ -105,7 +116,7 @@ export class SystemAudioCaptureService {
     } catch (error) {
       this.activeCapture = null;
       await this.terminateCapture(capture);
-      await this.cleanupTempDir(tempDir);
+      await this.cleanupCaptureOutput(capture);
       throw this.normalizeStartError(error);
     }
   }
@@ -169,7 +180,7 @@ export class SystemAudioCaptureService {
         durationMs
       };
     } finally {
-      await this.cleanupTempDir(capture.tempDir);
+      await this.cleanupCaptureOutput(capture);
     }
   }
 
@@ -226,14 +237,16 @@ export class SystemAudioCaptureService {
         );
       }
 
-      await fs.copyFile(capture.outputPath, targetPath);
+      if (path.resolve(capture.outputPath) !== path.resolve(targetPath)) {
+        await fs.copyFile(capture.outputPath, targetPath);
+      }
 
       return {
         audioMimeType: 'audio/wav',
         durationMs
       };
     } finally {
-      await this.cleanupTempDir(capture.tempDir);
+      await this.cleanupCaptureOutput(capture);
     }
   }
 
@@ -347,12 +360,12 @@ export class SystemAudioCaptureService {
     this.activeCapture = null;
 
     if (capture.kind === 'mock') {
-      await this.cleanupTempDir(capture.tempDir);
+      await this.cleanupCaptureOutput(capture);
       return;
     }
 
     await this.terminateCapture(capture);
-    await this.cleanupTempDir(capture.tempDir);
+    await this.cleanupCaptureOutput(capture);
   }
 
   // 개발 모드와 패키징된 앱에서 각각 다른 위치의 헬퍼 바이너리를 찾는다.
@@ -371,13 +384,15 @@ export class SystemAudioCaptureService {
   private createCaptureSession(
     child: ChildProcessWithoutNullStreams,
     outputPath: string,
-    tempDir: string
+    tempDir: string,
+    ownsTempDir: boolean
   ): HelperSystemAudioCapture {
     const capture: HelperSystemAudioCapture = {
       kind: 'helper',
       child,
       outputPath,
       tempDir,
+      ownsTempDir,
       startedAt: Date.now(),
       snapshotStartedAt: Date.now(),
       snapshotByteOffset: 44,
@@ -530,8 +545,10 @@ export class SystemAudioCaptureService {
   }
 
   // 임시 WAV 파일과 폴더는 저장소에 복사한 뒤 제거한다.
-  private async cleanupTempDir(tempDir: string): Promise<void> {
-    await fs.rm(tempDir, { recursive: true, force: true });
+  private async cleanupCaptureOutput(capture: ActiveSystemAudioCapture): Promise<void> {
+    if (capture.ownsTempDir) {
+      await fs.rm(capture.tempDir, { recursive: true, force: true });
+    }
   }
 
   // 헬퍼 종료 상태를 오류 문장 안에 짧게 넣는다.

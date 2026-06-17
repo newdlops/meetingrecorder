@@ -40,6 +40,11 @@ export async function transcribeRecordedAudio(
       audioRecordingId: recordedAudio.recordingId,
       audioMimeType: recordedAudio.mimeType,
       audioDurationMs: recordedAudio.durationMs,
+      audioStartOffsetMs: recordedAudio.startOffsetMs,
+      audioEndOffsetMs:
+        typeof recordedAudio.startOffsetMs === 'number'
+          ? recordedAudio.startOffsetMs + recordedAudio.durationMs
+          : undefined,
       mode: options.mode ?? 'final',
       minSpeakers: options.minSpeakers,
       maxSpeakers: options.maxSpeakers

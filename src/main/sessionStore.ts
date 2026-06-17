@@ -13,8 +13,13 @@ import type {
 import { buildTranscriptText, formatTranscriptDocument } from '../shared/transcriptFormatter';
 
 const SESSION_FILE_NAME = 'session.json';
-const AUDIO_FILE_NAME = 'recording.webm';
 const TRANSCRIPT_FILE_NAME = 'transcript.txt';
+
+interface StoredSessionAudioFile {
+  filePath: string;
+  audioMimeType: string;
+  durationMs: number;
+}
 
 // 회의 세션의 파일 저장과 조회를 책임지는 저장소 클래스다.
 export class MeetingSessionStore {
@@ -58,18 +63,21 @@ export class MeetingSessionStore {
 
     const normalizedSession = normalizeSession({
       ...session,
-      audioFileName: request.audioData || audioFilePath ? AUDIO_FILE_NAME : session.audioFileName,
+      audioFileName:
+        request.audioData || audioFilePath
+          ? getAudioFileName(request.audioMimeType ?? session.audioMimeType)
+          : session.audioFileName,
       audioMimeType: request.audioMimeType ?? session.audioMimeType,
       updatedAt: new Date().toISOString()
     });
 
     if (audioFilePath) {
-      const audioPath = path.join(sessionDirectory, AUDIO_FILE_NAME);
+      const audioPath = path.join(sessionDirectory, normalizedSession.audioFileName ?? getAudioFileName(request.audioMimeType));
       await copyFile(audioFilePath, audioPath);
     }
 
     if (request.audioData) {
-      const audioPath = path.join(sessionDirectory, AUDIO_FILE_NAME);
+      const audioPath = path.join(sessionDirectory, normalizedSession.audioFileName ?? getAudioFileName(request.audioMimeType));
       await writeFile(audioPath, Buffer.from(request.audioData));
     }
 
@@ -179,6 +187,21 @@ export class MeetingSessionStore {
     };
   }
 
+  async getAudioFileReference(sessionId: string): Promise<StoredSessionAudioFile> {
+    assertSafeSessionId(sessionId);
+    const session = await this.readSession(sessionId);
+
+    if (!session?.audioFileName) {
+      throw new Error('재처리할 녹음 파일이 없습니다.');
+    }
+
+    return {
+      filePath: path.join(this.getSessionDirectory(session.id), session.audioFileName),
+      audioMimeType: session.audioMimeType ?? getAudioFileMimeType(session.audioFileName),
+      durationMs: session.durationMs
+    };
+  }
+
   // 사용자가 고른 위치로 원본 녹음 파일을 복사한다.
   async exportAudio(sessionId: string, targetPath: string): Promise<void> {
     assertSafeSessionId(sessionId);
@@ -257,6 +280,30 @@ function normalizeSession(session: MeetingSession): MeetingSession {
     ...normalizedSession,
     transcriptText: normalizedSession.transcriptText || buildTranscriptText(normalizedSession)
   };
+}
+
+function getAudioFileName(mimeType?: string): string {
+  if (mimeType?.includes('wav')) {
+    return 'recording.wav';
+  }
+
+  if (mimeType?.includes('mp4') || mimeType?.includes('m4a')) {
+    return 'recording.mp4';
+  }
+
+  return 'recording.webm';
+}
+
+function getAudioFileMimeType(fileName: string): string {
+  if (fileName.endsWith('.wav')) {
+    return 'audio/wav';
+  }
+
+  if (fileName.endsWith('.mp4')) {
+    return 'audio/mp4';
+  }
+
+  return 'audio/webm';
 }
 
 // 세션 ID가 경로 밖으로 나가지 못하도록 허용 문자를 제한한다.

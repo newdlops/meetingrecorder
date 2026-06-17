@@ -1,4 +1,4 @@
-import { Download, FileAudio, Save, StickyNote, Trash2, Type } from 'lucide-react';
+import { Download, FileAudio, RefreshCw, Save, StickyNote, Trash2, Type } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import type { MeetingSession, SessionDetailsUpdateRequest, TranscriptionProgressEvent } from '../../../shared/types';
 
@@ -6,9 +6,12 @@ interface SessionManagementPanelProps {
   session: MeetingSession | null;
   disabled: boolean;
   allowDelete: boolean;
+  canReprocess: boolean;
+  isReprocessing: boolean;
   transcriptionProgress: TranscriptionProgressEvent | null;
   onSaveDetails(details: Omit<SessionDetailsUpdateRequest, 'sessionId'>): void;
   onExportAudio(): void;
+  onReprocess(): void;
   onDeleteSession(): void;
 }
 
@@ -17,9 +20,12 @@ export function SessionManagementPanel({
   session,
   disabled,
   allowDelete,
+  canReprocess,
+  isReprocessing,
   transcriptionProgress,
   onSaveDetails,
   onExportAudio,
+  onReprocess,
   onDeleteSession
 }: SessionManagementPanelProps): JSX.Element {
   const [title, setTitle] = useState('');
@@ -101,7 +107,11 @@ export function SessionManagementPanel({
           {transcriptionProgress ? (
             <div className="progressBlock">
               <div className="progressHeader">
-                <strong>{transcriptionProgress.message}</strong>
+                <strong>
+                  {transcriptionProgress.workerLabel
+                    ? `${transcriptionProgress.workerLabel} · ${transcriptionProgress.message}`
+                    : transcriptionProgress.message}
+                </strong>
                 <span>{Math.round(transcriptionProgress.progress)}%</span>
               </div>
               <div className="progressTrack">
@@ -120,6 +130,15 @@ export function SessionManagementPanel({
             <button className="ghostButton" disabled={!session.audioFileName} type="button" onClick={onExportAudio}>
               <Download size={16} />
               오디오 저장
+            </button>
+            <button
+              className="ghostButton"
+              disabled={disabled || !canReprocess}
+              type="button"
+              onClick={onReprocess}
+            >
+              <RefreshCw className={isReprocessing ? 'spin' : undefined} size={16} />
+              고품질 재처리
             </button>
           </div>
 

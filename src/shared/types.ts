@@ -92,6 +92,7 @@ export interface SystemAudioCaptureResult {
 export interface RecordingFileStartRequest {
   recordingId: string;
   audioMimeType: string;
+  externalWriter?: boolean;
 }
 
 export interface RecordingChunkAppendRequest {
@@ -134,7 +135,15 @@ export interface OfflineTranscriptionRequest {
   audioRecordingId?: string;
   audioMimeType: string;
   audioDurationMs?: number;
+  audioStartOffsetMs?: number;
+  audioEndOffsetMs?: number;
   mode?: OfflineTranscriptionMode;
+  minSpeakers?: number;
+  maxSpeakers?: number;
+}
+
+export interface SessionAudioTranscriptionRequest {
+  sessionId: string;
   minSpeakers?: number;
   maxSpeakers?: number;
 }
@@ -153,6 +162,8 @@ export interface TranscriptionProgressEvent {
   stage: TranscriptionProgressStage;
   progress: number;
   message: string;
+  workerId?: string;
+  workerLabel?: string;
 }
 
 export interface MeetingRecorderApi {
@@ -170,11 +181,12 @@ export interface MeetingRecorderApi {
   appendRecordingChunk(request: RecordingChunkAppendRequest): Promise<void>;
   completeRecordingFile(request: RecordingFileCompleteRequest): Promise<RecordingFileResult>;
   discardRecordingFile(recordingId: string): Promise<void>;
-  startSystemAudioCapture(): Promise<void>;
+  startSystemAudioCapture(recordingId?: string): Promise<void>;
   stopSystemAudioCapture(): Promise<SystemAudioCaptureResult>;
   stopSystemAudioCaptureToRecordingFile(recordingId: string): Promise<RecordingFileResult>;
   createSystemAudioSnapshot(): Promise<SystemAudioCaptureResult | null>;
   resetSystemAudioSnapshot(): Promise<void>;
   transcribeOffline(request: OfflineTranscriptionRequest): Promise<OfflineTranscriptionResult>;
+  transcribeSessionAudio(request: SessionAudioTranscriptionRequest): Promise<OfflineTranscriptionResult>;
   onTranscriptionProgress(listener: (event: TranscriptionProgressEvent) => void): () => void;
 }

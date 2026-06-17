@@ -10,6 +10,7 @@ import type {
   RecordingFileStartRequest,
   SaveMeetingSessionRequest,
   SegmentMemoUpdateRequest,
+  SessionAudioTranscriptionRequest,
   SessionDetailsUpdateRequest,
   SpeakerUpdateRequest
 } from '../shared/types';
@@ -102,7 +103,10 @@ export function registerIpcHandlers(
     recordingFileService.discard(recordingId)
   );
 
-  ipcMain.handle('system-audio:start', async () => systemAudioCaptureService.start());
+  ipcMain.handle('system-audio:start', async (_event, recordingId?: string) => {
+    const outputPath = recordingId ? recordingFileService.getActiveFilePath(recordingId) : undefined;
+    return systemAudioCaptureService.start(outputPath);
+  });
 
   ipcMain.handle('system-audio:stop', async () => systemAudioCaptureService.stop());
 
@@ -125,4 +129,23 @@ export function registerIpcHandlers(
       event.sender.send('transcription:progress', progress);
     })
   );
+
+  ipcMain.handle('transcription:session-audio', async (event, request: SessionAudioTranscriptionRequest) => {
+    const audioFile = await store.getAudioFileReference(request.sessionId);
+
+    return transcriptionService.transcribeStoredAudioFile(
+      {
+        sessionId: request.sessionId,
+        audioMimeType: audioFile.audioMimeType,
+        audioDurationMs: audioFile.durationMs,
+        mode: 'final',
+        minSpeakers: request.minSpeakers,
+        maxSpeakers: request.maxSpeakers
+      },
+      audioFile.filePath,
+      (progress) => {
+        event.sender.send('transcription:progress', progress);
+      }
+    );
+  });
 }

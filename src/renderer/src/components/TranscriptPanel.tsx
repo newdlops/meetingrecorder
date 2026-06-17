@@ -12,6 +12,10 @@ interface TranscriptPanelProps {
   memoDisabled?: boolean;
   playingSegmentId?: string | null;
   previewProgress?: TranscriptionProgressEvent | null;
+  previewQueuePendingCount?: number;
+  previewActiveWorkerCount?: number;
+  previewMaxWorkerCount?: number;
+  previewWorkerProgress?: TranscriptionProgressEvent[];
   onPlaySegment?: (segment: TranscriptSegment) => void;
   onSegmentMemoChange?: (segmentId: string, memo: string) => void;
   onExport?: () => void;
@@ -27,6 +31,10 @@ export function TranscriptPanel({
   memoDisabled = false,
   playingSegmentId,
   previewProgress,
+  previewQueuePendingCount = 0,
+  previewActiveWorkerCount = 0,
+  previewMaxWorkerCount = 0,
+  previewWorkerProgress = [],
   onPlaySegment,
   onSegmentMemoChange,
   onExport
@@ -51,9 +59,29 @@ export function TranscriptPanel({
 
       {isRecording && isRealtimeTranscriptionEnabled ? (
         <div className="livePreviewStatus">
-          {isLivePreviewing ? <Loader2 className="spin" size={16} /> : <MessageSquareText size={16} />}
-          <strong>{previewMessage}</strong>
-          {previewProgress ? <span>{Math.round(previewProgress.progress)}%</span> : null}
+          <div className="livePreviewSummary">
+            {isLivePreviewing ? <Loader2 className="spin" size={16} /> : <MessageSquareText size={16} />}
+            <strong>{previewMessage}</strong>
+            <span>
+              대기 {previewQueuePendingCount}개 · 처리 {previewActiveWorkerCount}/{previewMaxWorkerCount}
+            </span>
+          </div>
+          {previewWorkerProgress.length > 0 ? (
+            <div className="workerStatusGrid">
+              {previewWorkerProgress.map((progress) => (
+                <div className="workerStatus" key={progress.workerId ?? progress.workerLabel ?? progress.message}>
+                  <div className="workerStatusHeader">
+                    <strong>{progress.workerLabel ?? '전사 worker'}</strong>
+                    <span>{Math.round(progress.progress)}%</span>
+                  </div>
+                  <div className="workerProgressTrack">
+                    <span style={{ width: `${Math.max(0, Math.min(100, progress.progress))}%` }} />
+                  </div>
+                  <p>{progress.message}</p>
+                </div>
+              ))}
+            </div>
+          ) : null}
         </div>
       ) : null}
 

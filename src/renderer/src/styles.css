@@ -211,6 +211,13 @@ textarea:disabled {
   line-height: 1.1;
 }
 
+.recorderProgressSummary {
+  margin: 5px 0 0;
+  color: #526265;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .recorderActions {
   display: flex;
   gap: 10px;
@@ -331,11 +338,142 @@ textarea:disabled {
   font-size: 14px;
 }
 
+.dialogOverlay {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(28, 37, 38, 0.38);
+}
+
+.stopRecordingDialog {
+  width: min(420px, 100%);
+  padding: 20px;
+  background: #ffffff;
+  border: 1px solid #d9e2e4;
+  border-radius: 8px;
+  box-shadow: 0 20px 50px rgba(28, 37, 38, 0.22);
+}
+
+.stopRecordingDialog h2,
+.stopRecordingDialog p {
+  margin: 0;
+}
+
+.stopRecordingDialog h2 {
+  color: #1c2526;
+  font-size: 18px;
+}
+
+.stopRecordingDialog p {
+  margin-top: 8px;
+  color: #526265;
+  font-size: 14px;
+}
+
+.dialogActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
 .contentGrid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 340px;
   gap: 20px;
   min-height: 0;
+}
+
+.reviewPanel {
+  padding: 20px;
+  background: #ffffff;
+  border: 1px solid #d9e2e4;
+  border-radius: 8px;
+}
+
+.reviewHeader {
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin-bottom: 16px;
+}
+
+.reviewHeader h2,
+.reviewHeader p {
+  margin: 0;
+}
+
+.reviewHeader h2 {
+  font-size: 18px;
+}
+
+.reviewHeader p {
+  margin-top: 5px;
+  color: #627174;
+  font-size: 13px;
+}
+
+.reviewActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.reviewList {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  max-height: 42vh;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.reviewItem {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: stretch;
+}
+
+.reviewTime {
+  padding: 12px 0;
+  color: #526265;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.reviewChoice {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-height: 92px;
+  padding: 12px;
+  color: #263234;
+  text-align: left;
+  white-space: pre-wrap;
+  background: #f7faf9;
+  border: 1px solid #dfe7e9;
+  border-radius: 8px;
+}
+
+.reviewChoice.active {
+  border-color: #1f7a8c;
+  background: #edf7f9;
+  box-shadow: inset 3px 0 0 #1f7a8c;
+}
+
+.reviewChoice strong {
+  color: #1f7a8c;
+  font-size: 13px;
+}
+
+.reviewChoice span {
+  line-height: 1.5;
 }
 
 .transcriptPanel,
@@ -357,6 +495,92 @@ textarea:disabled {
 .speakerPanel,
 .managementPanel {
   height: fit-content;
+}
+
+.managementForm,
+.fieldBlock,
+.audioBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.managementForm {
+  gap: 16px;
+}
+
+.fieldBlock span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #526265;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.fieldBlock input,
+.fieldBlock textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 10px 11px;
+  color: #243133;
+  background: #f8fbfb;
+  border: 1px solid #cedbdd;
+  border-radius: 8px;
+}
+
+.fieldBlock textarea {
+  resize: vertical;
+}
+
+.audioBlock audio {
+  width: 100%;
+}
+
+.managementActions {
+  display: flex;
+  gap: 8px;
+}
+
+.progressBlock {
+  padding: 12px;
+  background: #f7faf9;
+  border: 1px solid #dfe7e9;
+  border-radius: 8px;
+}
+
+.progressHeader {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  color: #526265;
+  font-size: 13px;
+}
+
+.progressHeader strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progressTrack,
+.workerProgressTrack {
+  height: 7px;
+  overflow: hidden;
+  background: #d9e2e4;
+  border-radius: 999px;
+}
+
+.progressTrack {
+  margin-top: 9px;
+}
+
+.progressTrack span,
+.workerProgressTrack span {
+  display: block;
+  height: 100%;
+  background: #1f7a8c;
 }
 
 .panelTitle,
@@ -399,8 +623,8 @@ textarea:disabled {
 
 .livePreviewStatus {
   display: flex;
-  align-items: center;
-  gap: 8px;
+  flex-direction: column;
+  gap: 10px;
   margin-bottom: 14px;
   padding: 10px 12px;
   color: #526265;
@@ -410,11 +634,57 @@ textarea:disabled {
   border-radius: 8px;
 }
 
-.livePreviewStatus strong {
+.livePreviewSummary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+}
+
+.livePreviewSummary strong {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.workerStatusGrid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  width: 100%;
+}
+
+.workerStatus {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 9px;
+  background: #ffffff;
+  border: 1px solid #d9e2e4;
+  border-radius: 8px;
+}
+
+.workerStatusHeader {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 12px;
+}
+
+.workerStatusHeader strong,
+.workerStatus p {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workerStatus p {
+  margin: 0;
+  color: #627174;
+  font-size: 12px;
 }
 
 .transcriptSegment {
@@ -575,7 +845,9 @@ textarea:disabled {
 
   .contentGrid,
   .recorderPanel,
-  .recorderControls {
+  .recorderControls,
+  .workerStatusGrid,
+  .reviewItem {
     grid-template-columns: 1fr;
   }
 

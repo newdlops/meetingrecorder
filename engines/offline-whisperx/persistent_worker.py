@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
@@ -99,6 +100,30 @@ def emit_progress(request_id: str, request: dict[str, Any], stage: str, progress
     )
 
 
+def release_request_memory(*values: Any) -> None:
+    """요청 단위 대형 객체 참조를 끊고 상주 worker의 메모리 반환 기회를 만든다."""
+
+    for value in values:
+        if isinstance(value, dict):
+            value.pop("_audio", None)
+            value.clear()
+        elif isinstance(value, list):
+            value.clear()
+
+    try:
+        import torch  # type: ignore
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        if hasattr(torch, "mps") and hasattr(torch.mps, "empty_cache"):
+            torch.mps.empty_cache()
+    except Exception:
+        pass
+
+    gc.collect()
+
+
 def load_cached_model(whisperx: Any, args: argparse.Namespace) -> Any:
     """상주 worker 시작 시 Whisper 모델을 메모리에 한 번만 로드한다."""
 
@@ -158,6 +183,10 @@ def process_request(whisperx: Any, model: Any, base_args: argparse.Namespace, re
     """stdin으로 받은 단일 전사 요청을 처리하고 result/error 메시지를 보낸다."""
 
     request_id = str(request["id"])
+    audio: Any | None = None
+    result: dict[str, Any] | None = None
+    output: dict[str, Any] | None = None
+    turns: list[Any] | None = None
 
     try:
         request_args = build_request_args(base_args, request)
@@ -175,7 +204,8 @@ def process_request(whisperx: Any, model: Any, base_args: argparse.Namespace, re
             result = transcribe_with_cached_model(whisperx, model, request_args, request_id, request)
 
         if request_args.transcribe_only:
-            emit({"type": "result", "id": request_id, "result": build_transcription_only_output(result)})
+            output = build_transcription_only_output(result)
+            emit({"type": "result", "id": request_id, "result": output})
             return
 
         emit_progress(request_id, request, "align", 68, "단어 시간 보정을 건너뜀")
@@ -183,12 +213,16 @@ def process_request(whisperx: Any, model: Any, base_args: argparse.Namespace, re
         turns = diarize_audio(result["_audio"], request_args)
         emit_progress(request_id, request, "diarize", 90, "화자 분리 완료")
         emit_progress(request_id, request, "save", 96, "전사 결과를 정리하는 중")
-        emit({"type": "result", "id": request_id, "result": build_output(result, turns)})
+        output = build_output(result, turns)
+        emit({"type": "result", "id": request_id, "result": output})
     except Exception as error:
         emit({"type": "error", "id": request_id, "message": str(error)})
 
         if os.environ.get("MEETING_RECORDER_STT_DEBUG") == "1":
             traceback.print_exc(file=sys.stderr)
+    finally:
+        audio = None
+        release_request_memory(output, result, turns)
 
 
 def main() -> int:

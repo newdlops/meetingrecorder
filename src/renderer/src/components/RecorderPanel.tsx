@@ -23,6 +23,8 @@ interface RecorderPanelProps {
   liveTranscriptionEnabled: boolean;
   expectedSpeakerCount: number;
   isLivePreviewing?: boolean;
+  processingLabel?: string;
+  progressMessage?: string;
   progressPercent?: number;
   onSensitivityChange(value: number): void;
   onInputSourceChange(value: RecorderInputSource): void;
@@ -45,6 +47,8 @@ export function RecorderPanel({
   liveTranscriptionEnabled,
   expectedSpeakerCount,
   isLivePreviewing = false,
+  processingLabel,
+  progressMessage,
   progressPercent,
   onSensitivityChange,
   onInputSourceChange,
@@ -57,17 +61,19 @@ export function RecorderPanel({
   const isRecording = status === 'recording';
   const isSaving = status === 'saving';
   const statusLabel =
+    isSaving
+      ? processingLabel ?? '처리 중'
+      : isRecording
+        ? '녹음 중'
+        : '대기';
+  const secondaryStatus =
     isSaving && typeof progressPercent === 'number'
-      ? `전사 중 ${Math.round(progressPercent)}%`
-      : isSaving
-        ? '저장 중'
-        : liveTranscriptionEnabled && isRecording
-          ? isLivePreviewing
-            ? '실시간 전사 중'
-            : '실시간 전사 대기'
-          : isRecording
-            ? '녹음 중'
-            : '대기';
+      ? `${progressMessage ?? '전사 진행 중'} · ${Math.round(progressPercent)}%`
+      : liveTranscriptionEnabled && isRecording
+        ? isLivePreviewing
+          ? '실시간 전사 처리 중'
+          : '실시간 전사 대기'
+        : null;
 
   return (
     <section className="recorderPanel">
@@ -76,6 +82,7 @@ export function RecorderPanel({
         <div>
           <p className="eyebrow">{statusLabel}</p>
           <strong>{formatDuration(elapsedMs)}</strong>
+          {secondaryStatus ? <p className="recorderProgressSummary">{secondaryStatus}</p> : null}
         </div>
       </div>
 

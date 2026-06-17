@@ -8,6 +8,7 @@ import type {
   RecordingFileStartRequest,
   SaveMeetingSessionRequest,
   SegmentMemoUpdateRequest,
+  SessionAudioTranscriptionRequest,
   SessionDetailsUpdateRequest,
   SpeakerUpdateRequest
 } from '../shared/types';
@@ -36,7 +37,7 @@ const meetingRecorderApi: MeetingRecorderApi = {
     ipcRenderer.invoke('recording-file:complete', request),
   discardRecordingFile: (recordingId: string) =>
     ipcRenderer.invoke('recording-file:discard', recordingId),
-  startSystemAudioCapture: () => ipcRenderer.invoke('system-audio:start'),
+  startSystemAudioCapture: (recordingId?: string) => ipcRenderer.invoke('system-audio:start', recordingId),
   stopSystemAudioCapture: () => ipcRenderer.invoke('system-audio:stop'),
   stopSystemAudioCaptureToRecordingFile: (recordingId: string) =>
     ipcRenderer.invoke('system-audio:stop-to-recording-file', recordingId),
@@ -44,6 +45,8 @@ const meetingRecorderApi: MeetingRecorderApi = {
   resetSystemAudioSnapshot: () => ipcRenderer.invoke('system-audio:reset-snapshot'),
   transcribeOffline: (request: OfflineTranscriptionRequest) =>
     ipcRenderer.invoke('transcription:offline', request),
+  transcribeSessionAudio: (request: SessionAudioTranscriptionRequest) =>
+    ipcRenderer.invoke('transcription:session-audio', request),
   onTranscriptionProgress: (listener) => {
     const handler = (_event: IpcRendererEvent, progress: Parameters<typeof listener>[0]) => {
       listener(progress);
