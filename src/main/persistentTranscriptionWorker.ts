@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   OfflineTranscriptionRequest,
   OfflineTranscriptionResult,
+  TranscriptionEngine,
   TranscriptionInferenceMode,
   TranscriptionProgressEvent,
   TranscriptionProgressStage
@@ -24,6 +25,7 @@ export interface PersistentTranscriptionJob {
   transcribeOnly: boolean;
   batchSize?: string;
   finalDecoder?: TranscriptionInferenceMode;
+  transcriptionEngine?: TranscriptionEngine;
   minSpeakers?: number;
   maxSpeakers?: number;
   allowDiarizationFallback?: boolean;
@@ -79,6 +81,7 @@ export class PersistentTranscriptionWorker {
         transcribeOnly: job.transcribeOnly,
         batchSize: job.batchSize ? Number(job.batchSize) : undefined,
         finalDecoder: job.finalDecoder,
+        transcriptionEngine: job.transcriptionEngine,
         minSpeakers: job.minSpeakers,
         maxSpeakers: job.maxSpeakers,
         allowDiarizationFallback: job.allowDiarizationFallback,

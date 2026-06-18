@@ -31,6 +31,7 @@ from quality_transcription import (
     should_use_standard_decoder,
     transcribe_audio_with_standard_decoder,
 )
+from whisper_cpp_transcription import transcribe_audio_with_whisper_cpp
 
 DEFAULT_LANGUAGE = "ko"
 DEFAULT_TASK = "transcribe"
@@ -61,6 +62,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model-dir", help="모델 캐시 디렉터리")
     parser.add_argument("--asset-root", help="앱에 포함된 엔진 모델 자산 루트")
+    parser.add_argument(
+        "--transcription-engine",
+        choices=("whisperx", "whisperCpp"),
+        default="whisperx",
+        help="ASR 엔진. 기본값은 기존 WhisperX/faster-whisper",
+    )
+    parser.add_argument("--whisper-cpp-binary", help="whisper.cpp whisper-cli 실행 파일 경로")
+    parser.add_argument("--whisper-cpp-model", help="whisper.cpp full precision 모델 경로")
     parser.add_argument("--diarization-segmentation-model", help="sherpa-onnx 화자 segmentation ONNX 경로")
     parser.add_argument("--diarization-embedding-model", help="sherpa-onnx speaker embedding ONNX 경로")
     parser.add_argument("--num-speakers", type=int, default=-1, help="알고 있는 화자 수. 모르면 -1")
@@ -200,6 +209,14 @@ def build_vad_options(args: argparse.Namespace) -> dict[str, Any]:
 
 def transcribe_audio(whisperx: Any, args: argparse.Namespace) -> dict[str, Any]:
     """WhisperX로 음성을 텍스트와 단어 타임스탬프로 변환한다."""
+
+    if args.transcription_engine == "whisperCpp":
+        result = transcribe_audio_with_whisper_cpp(
+            args,
+            lambda stage, progress, message: emit_progress(args, stage, progress, message),
+        )
+        result["_audio"] = whisperx.load_audio(args.audio)
+        return result
 
     emit_progress(args, "model", 8, "전사 모델을 불러오는 중")
     model = call_with_supported_kwargs(
@@ -459,7 +476,7 @@ def build_output(result: dict[str, Any], turns: list[DiarizedTurn], args: argpar
     duration_ms = max((segment["endMs"] for segment in segments), default=0)
 
     return {
-        "engineName": "whisperx-sherpa-onnx-local",
+        "engineName": result.get("_engineName") or "whisperx-sherpa-onnx-local",
         "language": result.get("language"),
         "durationMs": duration_ms,
         "speakers": speakers,
@@ -488,7 +505,7 @@ def build_transcription_only_output(result: dict[str, Any]) -> dict[str, Any]:
     duration_ms = max((segment["endMs"] for segment in segments), default=0)
 
     return {
-        "engineName": "whisperx-local-preview",
+        "engineName": result.get("_engineName") or "whisperx-local-preview",
         "language": result.get("language"),
         "durationMs": duration_ms,
         "speakers": [PREVIEW_SPEAKER],

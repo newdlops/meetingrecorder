@@ -34,6 +34,7 @@ from quality_transcription import (
     should_use_standard_decoder,
     transcribe_audio_with_standard_decoder,
 )
+from whisper_cpp_transcription import transcribe_audio_with_whisper_cpp
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,6 +53,14 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--model-dir", help="모델 캐시 디렉터리")
     parser.add_argument("--asset-root", help="앱에 포함된 엔진 모델 자산 루트")
+    parser.add_argument(
+        "--transcription-engine",
+        choices=("whisperx", "whisperCpp"),
+        default="whisperx",
+        help="ASR 엔진. 기본값은 기존 WhisperX/faster-whisper",
+    )
+    parser.add_argument("--whisper-cpp-binary", help="whisper.cpp whisper-cli 실행 파일 경로")
+    parser.add_argument("--whisper-cpp-model", help="whisper.cpp full precision 모델 경로")
     parser.add_argument("--diarization-segmentation-model", help="sherpa-onnx 화자 segmentation ONNX 경로")
     parser.add_argument("--diarization-embedding-model", help="sherpa-onnx speaker embedding ONNX 경로")
     parser.add_argument("--num-speakers", type=int, default=-1, help="알고 있는 화자 수. 모르면 -1")
@@ -173,6 +182,11 @@ def build_request_args(base_args: argparse.Namespace, request: dict[str, Any]) -
 
     next_args.audio = str(request["audioPath"])
     next_args.batch_size = int(request.get("batchSize") or 4)
+    next_args.transcription_engine = (
+        request.get("transcriptionEngine")
+        if request.get("transcriptionEngine") in {"whisperx", "whisperCpp"}
+        else base_args.transcription_engine
+    )
     next_args.min_speakers = request.get("minSpeakers")
     next_args.max_speakers = request.get("maxSpeakers")
     next_args.transcribe_only = bool(request.get("transcribeOnly"))
@@ -217,7 +231,14 @@ def process_request(whisperx: Any, model: Any, base_args: argparse.Namespace, re
 
     try:
         request_args = build_request_args(base_args, request)
-        if should_use_standard_decoder(request_args):
+        if request_args.transcription_engine == "whisperCpp":
+            result = transcribe_audio_with_whisper_cpp(
+                request_args,
+                lambda stage, progress, message: emit_progress(request_id, request, stage, progress, message),
+            )
+            audio = whisperx.load_audio(request_args.audio)
+            result["_audio"] = audio
+        elif should_use_standard_decoder(request_args):
             emit_progress(request_id, request, "model", 12, "전사 모델 준비 완료")
             emit_progress(request_id, request, "audio", 20, "오디오를 분석하는 중")
             audio = whisperx.load_audio(request_args.audio)

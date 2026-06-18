@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, statSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const venvRoot = path.join(repoRoot, '.venv-stt');
+const whisperCppBinaryRelativePath =
+  process.platform === 'win32' ? 'engines/whisper.cpp/bin/whisper-cli.exe' : 'engines/whisper.cpp/bin/whisper-cli';
 const errors = [];
 
 function resolvePath(relativePath) {
@@ -41,6 +44,20 @@ function requireFile(relativePath, options = {}) {
 
   if (options.executable && process.platform !== 'win32' && (stats.mode & 0o111) === 0) {
     addError(`file is not executable: ${relativePath}`);
+  }
+}
+
+function requireExecutableRuns(relativePath, args = ['--help']) {
+  const filePath = resolvePath(relativePath);
+
+  if (!existsSync(filePath)) {
+    return;
+  }
+
+  const result = spawnSync(filePath, args, { stdio: 'ignore' });
+
+  if (result.status !== 0) {
+    addError(`executable does not run: ${relativePath}`);
   }
 }
 
@@ -170,7 +187,10 @@ function verifyEngineFiles() {
   requireFile('engines/offline-whisperx/worker.py');
   requireFile('engines/offline-whisperx/diarization.py');
   requireFile('engines/offline-whisperx/quality_transcription.py');
+  requireFile('engines/offline-whisperx/whisper_cpp_transcription.py');
   requireFile('engines/offline-whisperx/requirements.txt');
+  requireFile(whisperCppBinaryRelativePath, { executable: true, minBytes: 1024 });
+  requireExecutableRuns(whisperCppBinaryRelativePath);
 }
 
 function verifyModelFiles() {
@@ -179,6 +199,7 @@ function verifyModelFiles() {
   requireFile('engines/models/whisper/faster-whisper-large-v3/tokenizer.json');
   requireFile('engines/models/whisper/faster-whisper-large-v3/vocabulary.json');
   requireFile('engines/models/whisper/faster-whisper-large-v3/preprocessor_config.json');
+  requireFile('engines/models/whisper.cpp/ggml-large-v3.bin', { minBytes: 100 * 1024 * 1024 });
   requireFile('engines/models/diarization/sherpa-onnx-pyannote-segmentation-3-0/model.onnx', {
     minBytes: 1024 * 1024
   });
@@ -190,6 +211,7 @@ function verifyModelFiles() {
 function verifyPackagingConfig() {
   requireExtraResource('engines/offline-whisperx');
   requireExtraResource('engines/models');
+  requireExtraResource('engines/whisper.cpp');
   requireExtraResource('.venv-stt');
 }
 

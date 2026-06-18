@@ -38,4 +38,6 @@ npm run reset:system-audio-permission
 npm run build:prod
 ```
 
-생성된 앱은 `release/` 아래에 만들어집니다. 패키징 전에 `verify:engine-bundle`이 Python 런타임, STT 모델, 화자분리 모델이 모두 포함 가능한 상태인지 확인합니다. 한국어 전사는 기본값이며 내부적으로 `MEETING_RECORDER_STT_LANGUAGE=ko`와 `MEETING_RECORDER_STT_TASK=transcribe`를 사용합니다. 화자분리는 Hugging Face token이 필요 없는 `sherpa-onnx` 로컬 ONNX 모델을 사용합니다. 동시에 말하는 구간은 `TranscriptSegment.isOverlapped`와 `overlapGroupId`로 저장합니다.
+생성된 앱은 `release/` 아래에 만들어집니다. 패키징 전에 `verify:engine-bundle`이 Python 런타임, STT 모델, 화자분리 모델, `whisper.cpp` 바이너리와 full precision 모델이 모두 포함 가능한 상태인지 확인합니다. 한국어 전사는 기본값이며 내부적으로 `MEETING_RECORDER_STT_LANGUAGE=ko`와 `MEETING_RECORDER_STT_TASK=transcribe`를 사용합니다. 화자분리는 Hugging Face token이 필요 없는 `sherpa-onnx` 로컬 ONNX 모델을 사용합니다. 동시에 말하는 구간은 `TranscriptSegment.isOverlapped`와 `overlapGroupId`로 저장합니다.
+
+설정 화면의 기본 전사 엔진은 기존 고정밀 `WhisperX`입니다. `whisper.cpp`는 추가 엔진으로 선택할 수 있으며, `setup:standalone`이 `whisper-cli`와 full precision `large-v3` 모델을 함께 준비합니다. 이미 빌드된 `whisper-cli`가 있으면 `MEETING_RECORDER_WHISPER_CPP_BINARY`로 지정해 배포 자산에 복사할 수 있습니다.

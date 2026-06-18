@@ -14,7 +14,9 @@
 npm run build:prod
 ```
 
-`build:prod`는 `.venv-stt` Python 엔진과 `engines/models` 모델 자산을 먼저 준비한 뒤 `verify:engine-bundle`로 누락 여부를 검사합니다. 검증을 통과한 자산은 Electron 앱의 resources 폴더에 포함되므로 최종 사용자는 Python, STT 모델, 화자분리 모델을 별도로 설치하지 않습니다.
+`build:prod`는 `.venv-stt` Python 엔진, `engines/models` 모델 자산, `whisper.cpp` 바이너리를 먼저 준비한 뒤 `verify:engine-bundle`로 누락 여부를 검사합니다. 검증을 통과한 자산은 Electron 앱의 resources 폴더에 포함되므로 최종 사용자는 Python, STT 모델, 화자분리 모델을 별도로 설치하지 않습니다.
+
+기본 전사 엔진은 기존 `WhisperX`입니다. `whisper.cpp`는 설정에서 추가로 선택할 수 있으며, 정확도 손실을 피하기 위해 setup 단계에서 quantized 모델이 아닌 full precision `large-v3` 모델을 준비합니다.
 
 ## 주요 환경변수
 

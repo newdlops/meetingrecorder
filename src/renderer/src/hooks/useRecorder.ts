@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { RecordingStatus, TranscriptionInferenceMode } from '../../../shared/types';
+import type { RecordingStatus, TranscriptionEngine, TranscriptionInferenceMode } from '../../../shared/types';
 
 export interface RecordedAudio {
   blob?: Blob;
@@ -19,6 +19,7 @@ export interface RecorderSettings {
   liveTranscriptionEnabled: boolean;
   expectedSpeakerCount: number;
   previewWorkerCount: number;
+  transcriptionEngine: TranscriptionEngine;
   transcriptionInferenceMode: TranscriptionInferenceMode;
 }
 

@@ -610,6 +610,7 @@ textarea:disabled {
 }
 
 .workerCountControl,
+.engineControl,
 .inferenceModeControl {
   display: flex;
   flex-direction: column;
@@ -617,6 +618,7 @@ textarea:disabled {
 }
 
 .workerCountControl span,
+.engineControl span,
 .inferenceModeControl span {
   display: inline-flex;
   align-items: center;
@@ -648,10 +650,12 @@ textarea:disabled {
   border-radius: 8px;
 }
 
+.engineControl,
 .inferenceModeControl {
   margin-top: 16px;
 }
 
+.engineOptions,
 .inferenceModeOptions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -659,6 +663,7 @@ textarea:disabled {
   align-items: stretch;
 }
 
+.engineOptions button,
 .inferenceModeOptions button {
   min-height: 38px;
   min-width: 0;
@@ -674,6 +679,7 @@ textarea:disabled {
   height: 100%;
 }
 
+.engineOptions button.active,
 .inferenceModeOptions button.active {
   color: #ffffff;
   background: #1f7a8c;

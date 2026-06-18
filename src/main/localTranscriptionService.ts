@@ -10,6 +10,7 @@ import type {
   OfflineTranscriptionRequest,
   OfflineTranscriptionResult,
   TranscriptSegment,
+  TranscriptionEngine,
   TranscriptionInferenceMode,
   TranscriptionProgressEvent
 } from '../shared/types';
@@ -28,6 +29,7 @@ const DEFAULT_FINAL_CHUNK_MS = 10 * 60 * 1000;
 const SINGLE_PASS_CHUNK_COUNT = 1;
 const FINAL_WORKER_ID = 'final-1';
 const FINAL_WORKER_LABEL = '최종 전사';
+const DEFAULT_TRANSCRIPTION_ENGINE: TranscriptionEngine = 'whisperx';
 const DEFAULT_TRANSCRIPTION_INFERENCE_MODE: TranscriptionInferenceMode = 'literal';
 
 type TranscriptionWorkerPurpose = 'final' | 'preview';
@@ -190,6 +192,7 @@ export class LocalTranscriptionService {
     }
 
     const inferenceMode = this.getTranscriptionInferenceMode(request.transcriptionInferenceMode);
+    const transcriptionEngine = this.getTranscriptionEngine(request.transcriptionEngine);
 
     return this.getFinalWorker().transcribe(
       {
@@ -198,6 +201,7 @@ export class LocalTranscriptionService {
         transcribeOnly: false,
         batchSize: this.getBatchSize(false),
         finalDecoder: inferenceMode,
+        transcriptionEngine,
         minSpeakers: request.minSpeakers,
         maxSpeakers: request.maxSpeakers
       },
@@ -212,6 +216,7 @@ export class LocalTranscriptionService {
   ): Promise<OfflineTranscriptionResult> {
     const managedWorker = this.getNextPreviewWorker(this.getPreviewWorkerCount(request.previewWorkerCount));
     const inferenceMode = this.getTranscriptionInferenceMode(request.transcriptionInferenceMode);
+    const transcriptionEngine = this.getTranscriptionEngine(request.transcriptionEngine);
     managedWorker.activeJobs += 1;
 
     try {
@@ -222,6 +227,7 @@ export class LocalTranscriptionService {
           transcribeOnly: false,
           batchSize: this.getBatchSize(true),
           finalDecoder: inferenceMode,
+          transcriptionEngine,
           minSpeakers: request.minSpeakers,
           maxSpeakers: request.maxSpeakers,
           allowDiarizationFallback: true,
@@ -253,6 +259,7 @@ export class LocalTranscriptionService {
     const flushedSegmentsPath = path.join(chunkDirectory, 'segments.jsonl');
     const speakers = new Map<string, OfflineTranscriptionResult['speakers'][number]>();
     const inferenceMode = this.getTranscriptionInferenceMode(request.transcriptionInferenceMode);
+    const transcriptionEngine = this.getTranscriptionEngine(request.transcriptionEngine);
     let language: string | undefined;
     let flushedSegmentCount = 0;
 
@@ -288,6 +295,7 @@ export class LocalTranscriptionService {
               transcribeOnly: false,
               batchSize: this.getBatchSize(false),
               finalDecoder: inferenceMode,
+              transcriptionEngine,
               minSpeakers: request.minSpeakers,
               maxSpeakers: request.maxSpeakers
             },
@@ -577,7 +585,11 @@ export class LocalTranscriptionService {
       '--asset-root',
       assetRoot,
       '--model-dir',
-      this.getWhisperModelDirectory(assetRoot, purpose, useFinalQualityModel)
+      this.getWhisperModelDirectory(assetRoot, purpose, useFinalQualityModel),
+      '--whisper-cpp-binary',
+      this.getWhisperCppBinaryPath(),
+      '--whisper-cpp-model',
+      this.getWhisperCppModelPath(assetRoot)
     ];
 
     this.appendOptionalArg(args, '--threads', this.getPersistentThreadCount(purpose));
@@ -767,6 +779,28 @@ export class LocalTranscriptionService {
     return process.env.MEETING_RECORDER_STT_MODEL_DIR ?? path.join(assetRoot, 'whisper');
   }
 
+  private getWhisperCppBinaryPath(): string {
+    if (process.env.MEETING_RECORDER_WHISPER_CPP_BINARY) {
+      return process.env.MEETING_RECORDER_WHISPER_CPP_BINARY;
+    }
+
+    const executableName = process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli';
+    const candidatePaths = [
+      path.join(process.resourcesPath, 'engines/whisper.cpp/bin', executableName),
+      path.join(this.appRoot, 'engines/whisper.cpp/bin', executableName)
+    ];
+
+    return candidatePaths.find((candidatePath) => existsSync(candidatePath)) ?? candidatePaths[candidatePaths.length - 1];
+  }
+
+  private getWhisperCppModelPath(assetRoot: string): string {
+    if (process.env.MEETING_RECORDER_WHISPER_CPP_MODEL) {
+      return process.env.MEETING_RECORDER_WHISPER_CPP_MODEL;
+    }
+
+    return path.join(assetRoot, 'whisper.cpp/ggml-large-v3.bin');
+  }
+
   private getWorkerDevice(purpose: TranscriptionWorkerPurpose): string {
     if (purpose === 'preview' && process.env.MEETING_RECORDER_STT_PREVIEW_DEVICE) {
       return process.env.MEETING_RECORDER_STT_PREVIEW_DEVICE;
@@ -810,6 +844,10 @@ export class LocalTranscriptionService {
 
   private getTranscriptionInferenceMode(value?: TranscriptionInferenceMode): TranscriptionInferenceMode {
     return value === 'contextual' || value === 'literal' ? value : DEFAULT_TRANSCRIPTION_INFERENCE_MODE;
+  }
+
+  private getTranscriptionEngine(value?: TranscriptionEngine): TranscriptionEngine {
+    return value === 'whisperCpp' || value === 'whisperx' ? value : DEFAULT_TRANSCRIPTION_ENGINE;
   }
 
   // 녹음 중 미리보기 부하를 고려해 상주 모델의 CPU 스레드 수를 보수적으로 둔다.

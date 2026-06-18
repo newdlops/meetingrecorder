@@ -121,6 +121,8 @@ export type OfflineTranscriptionMode = 'final' | 'preview';
 
 export type TranscriptionInferenceMode = 'literal' | 'contextual';
 
+export type TranscriptionEngine = 'whisperx' | 'whisperCpp';
+
 export type TranscriptionProgressStage =
   | 'prepare'
   | 'model'
@@ -143,6 +145,7 @@ export interface OfflineTranscriptionRequest {
   minSpeakers?: number;
   maxSpeakers?: number;
   previewWorkerCount?: number;
+  transcriptionEngine?: TranscriptionEngine;
   transcriptionInferenceMode?: TranscriptionInferenceMode;
 }
 
@@ -150,6 +153,7 @@ export interface SessionAudioTranscriptionRequest {
   sessionId: string;
   minSpeakers?: number;
   maxSpeakers?: number;
+  transcriptionEngine?: TranscriptionEngine;
   transcriptionInferenceMode?: TranscriptionInferenceMode;
 }
 

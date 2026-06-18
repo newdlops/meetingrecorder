@@ -141,6 +141,7 @@ export function registerIpcHandlers(
         mode: 'final',
         minSpeakers: request.minSpeakers,
         maxSpeakers: request.maxSpeakers,
+        transcriptionEngine: request.transcriptionEngine,
         transcriptionInferenceMode: request.transcriptionInferenceMode
       },
       audioFile.filePath,

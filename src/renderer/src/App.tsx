@@ -6,6 +6,7 @@ import type {
   SessionDetailsUpdateRequest,
   SpeakerProfile,
   TranscriptSegment,
+  TranscriptionEngine,
   TranscriptionInferenceMode,
   TranscriptionProgressEvent
 } from '../../shared/types';
@@ -34,6 +35,8 @@ const MIN_PREVIEW_WORKER_COUNT = 1;
 const MAX_PREVIEW_WORKER_COUNT = 8;
 const PREVIEW_SEGMENT_ID_PREFIX = 'preview';
 const PREVIEW_WORKER_COUNT_STORAGE_KEY = 'meetingRecorder.previewWorkerCount';
+const DEFAULT_TRANSCRIPTION_ENGINE: TranscriptionEngine = 'whisperx';
+const TRANSCRIPTION_ENGINE_STORAGE_KEY = 'meetingRecorder.transcriptionEngine';
 const DEFAULT_TRANSCRIPTION_INFERENCE_MODE: TranscriptionInferenceMode = 'literal';
 const FINAL_REPROCESS_INFERENCE_MODE: TranscriptionInferenceMode = 'contextual';
 const TRANSCRIPTION_INFERENCE_MODE_STORAGE_KEY = 'meetingRecorder.transcriptionInferenceMode';
@@ -253,6 +256,26 @@ function writeStoredPreviewWorkerCount(value: number): void {
   }
 }
 
+function normalizeTranscriptionEngine(value: unknown): TranscriptionEngine {
+  return value === 'whisperCpp' || value === 'whisperx' ? value : DEFAULT_TRANSCRIPTION_ENGINE;
+}
+
+function readStoredTranscriptionEngine(): TranscriptionEngine {
+  try {
+    return normalizeTranscriptionEngine(window.localStorage.getItem(TRANSCRIPTION_ENGINE_STORAGE_KEY));
+  } catch {
+    return DEFAULT_TRANSCRIPTION_ENGINE;
+  }
+}
+
+function writeStoredTranscriptionEngine(value: TranscriptionEngine): void {
+  try {
+    window.localStorage.setItem(TRANSCRIPTION_ENGINE_STORAGE_KEY, normalizeTranscriptionEngine(value));
+  } catch {
+    // 설정 저장 실패는 녹음/전사 동작을 막지 않는다.
+  }
+}
+
 function normalizeTranscriptionInferenceMode(value: unknown): TranscriptionInferenceMode {
   return value === 'contextual' || value === 'literal' ? value : DEFAULT_TRANSCRIPTION_INFERENCE_MODE;
 }
@@ -321,6 +344,7 @@ export function App(): JSX.Element {
     liveTranscriptionEnabled: false,
     expectedSpeakerCount: 0,
     previewWorkerCount: readStoredPreviewWorkerCount(),
+    transcriptionEngine: readStoredTranscriptionEngine(),
     transcriptionInferenceMode: readStoredTranscriptionInferenceMode()
   });
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
@@ -343,6 +367,7 @@ export function App(): JSX.Element {
   const isBusy = isSaving || isReprocessing || isStoppingAfterLivePreviewDrain;
   const visibleStatus: RecordingStatus = isBusy ? 'saving' : recordingStatus;
   const previewWorkerCount = normalizePreviewWorkerCount(recorderSettings.previewWorkerCount);
+  const transcriptionEngine = normalizeTranscriptionEngine(recorderSettings.transcriptionEngine);
   const transcriptionInferenceMode = normalizeTranscriptionInferenceMode(recorderSettings.transcriptionInferenceMode);
   const previewWorkerProgressList = Array.from({ length: previewWorkerCount }, (_unused, index) => {
     const workerId = `preview-${index + 1}`;
@@ -543,6 +568,7 @@ export function App(): JSX.Element {
           mode: 'preview',
           includeAudioData: false,
           previewWorkerCount,
+          transcriptionEngine,
           transcriptionInferenceMode,
           ...speakerOptions
         });
@@ -613,6 +639,7 @@ export function App(): JSX.Element {
       previewWorkerCount,
       recorderSettings.expectedSpeakerCount,
       syncLivePreviewQueueStats,
+      transcriptionEngine,
       transcriptionInferenceMode
     ]
   );
@@ -837,6 +864,15 @@ export function App(): JSX.Element {
     }));
   }, []);
 
+  const handleTranscriptionEngineChange = useCallback((nextEngine: TranscriptionEngine) => {
+    const normalizedEngine = normalizeTranscriptionEngine(nextEngine);
+    writeStoredTranscriptionEngine(normalizedEngine);
+    setRecorderSettings((currentSettings) => ({
+      ...currentSettings,
+      transcriptionEngine: normalizedEngine
+    }));
+  }, []);
+
   const handleTranscriptionInferenceModeChange = useCallback((nextInferenceMode: TranscriptionInferenceMode) => {
     const normalizedInferenceMode = normalizeTranscriptionInferenceMode(nextInferenceMode);
     writeStoredTranscriptionInferenceMode(normalizedInferenceMode);
@@ -1000,6 +1036,7 @@ export function App(): JSX.Element {
           : {};
       const result = await window.meetingRecorder.transcribeSessionAudio({
         sessionId: session.id,
+        transcriptionEngine,
         transcriptionInferenceMode: FINAL_REPROCESS_INFERENCE_MODE,
         ...speakerOptions
       });
@@ -1023,7 +1060,7 @@ export function App(): JSX.Element {
       setIsReprocessing(false);
       setFinalTranscriptionProgress(null);
     }
-  }, [recorderSettings.expectedSpeakerCount]);
+  }, [recorderSettings.expectedSpeakerCount, transcriptionEngine]);
 
   const handleChooseReviewItem = useCallback((itemId: string, choice: TranscriptionReviewChoice) => {
     setTranscriptionReview((currentReview) =>
@@ -1393,10 +1430,12 @@ export function App(): JSX.Element {
           <div className="sideStack">
             <ProcessingSettingsPanel
               disabled={recordingStatus === 'recording' || isBusy}
+              engine={transcriptionEngine}
               inferenceMode={transcriptionInferenceMode}
               maxWorkerCount={MAX_PREVIEW_WORKER_COUNT}
               minWorkerCount={MIN_PREVIEW_WORKER_COUNT}
               workerCount={previewWorkerCount}
+              onEngineChange={handleTranscriptionEngineChange}
               onInferenceModeChange={handleTranscriptionInferenceModeChange}
               onWorkerCountChange={handlePreviewWorkerCountChange}
             />

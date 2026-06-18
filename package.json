@@ -17,7 +17,8 @@
     "typecheck": "tsc --noEmit",
     "setup:stt": "python3 -m venv --clear --copies .venv-stt && .venv-stt/bin/python -m pip install --upgrade pip && .venv-stt/bin/python -m pip install -r engines/offline-whisperx/requirements.txt",
     "setup:engine-assets": ".venv-stt/bin/python scripts/setup-engine-assets.py",
-    "setup:standalone": "npm run setup:stt && npm run setup:engine-assets",
+    "setup:whisper-cpp": "node scripts/setup-whisper-cpp.mjs",
+    "setup:standalone": "npm run setup:stt && npm run setup:engine-assets && npm run setup:whisper-cpp",
     "verify:engine-bundle": "node scripts/verify-engine-bundle.mjs"
   },
   "dependencies": {
@@ -58,6 +59,10 @@
       {
         "from": "engines/models",
         "to": "engines/models"
+      },
+      {
+        "from": "engines/whisper.cpp",
+        "to": "engines/whisper.cpp"
       },
       {
         "from": ".venv-stt",

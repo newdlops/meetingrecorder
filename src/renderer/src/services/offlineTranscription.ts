@@ -1,6 +1,7 @@
 import type {
   OfflineTranscriptionMode,
   OfflineTranscriptionResult,
+  TranscriptionEngine,
   TranscriptionInferenceMode
 } from '../../../shared/types';
 import type { RecordedAudio } from '../hooks/useRecorder';
@@ -18,6 +19,7 @@ export interface TranscribeRecordedAudioOptions {
   minSpeakers?: number;
   maxSpeakers?: number;
   previewWorkerCount?: number;
+  transcriptionEngine?: TranscriptionEngine;
   transcriptionInferenceMode?: TranscriptionInferenceMode;
 }
 
@@ -58,6 +60,7 @@ export async function transcribeRecordedAudio(
       minSpeakers: options.minSpeakers,
       maxSpeakers: options.maxSpeakers,
       previewWorkerCount: options.previewWorkerCount,
+      transcriptionEngine: options.transcriptionEngine,
       transcriptionInferenceMode: options.transcriptionInferenceMode
     });
 
