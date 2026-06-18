@@ -7,6 +7,7 @@ export interface RecordedAudio {
   durationMs: number;
   mimeType: string;
   startOffsetMs?: number;
+  endOffsetMs?: number;
 }
 
 export type RecorderInputSource = 'microphone' | 'system';
@@ -389,7 +390,7 @@ export function useRecorder() {
     }
   }, [flushRecordingPcm]);
 
-  // 녹음을 끊지 않고 active 녹음 파일의 다음 5초 구간을 전사용 marker로 꺼낸다.
+  // 녹음을 끊지 않고 active 녹음 파일에서 전사 가능한 연속 marker 범위를 꺼낸다.
   const createRecordingSnapshot = useCallback(async (): Promise<RecordedAudio | null> => {
     if (previewMarkerInFlightRef.current) {
       return null;
@@ -410,20 +411,22 @@ export function useRecorder() {
       }
 
       const startOffsetMs = nextPreviewStartMsRef.current;
-      const endOffsetMs = startOffsetMs + PREVIEW_SEGMENT_MS;
       const elapsedMs = Math.max(0, Date.now() - startedAtRef.current);
+      const readyMarkerCount = Math.floor((elapsedMs - startOffsetMs) / PREVIEW_SEGMENT_MS);
 
-      if (elapsedMs < endOffsetMs) {
+      if (readyMarkerCount <= 0) {
         return null;
       }
 
+      const endOffsetMs = startOffsetMs + readyMarkerCount * PREVIEW_SEGMENT_MS;
       nextPreviewStartMsRef.current = endOffsetMs;
 
       return {
         recordingId,
-        durationMs: PREVIEW_SEGMENT_MS,
+        durationMs: endOffsetMs - startOffsetMs,
         mimeType: 'audio/wav',
-        startOffsetMs
+        startOffsetMs,
+        endOffsetMs
       };
     } finally {
       previewMarkerInFlightRef.current = false;

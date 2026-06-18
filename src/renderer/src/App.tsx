@@ -26,9 +26,9 @@ import { createDraftMeetingSession } from './services/meetingFactory';
 import { transcribeRecordedAudio } from './services/offlineTranscription';
 
 // 전사용 오디오 청크는 5초 단위로 만들어지고, UI 루프는 준비된 청크가 있는지만 가볍게 확인한다.
-const LIVE_PREVIEW_INITIAL_DELAY_MS = 1_000;
 const LIVE_PREVIEW_INTERVAL_MS = 1_000;
 const LIVE_PREVIEW_STOP_DRAIN_POLL_MS = 250;
+const LIVE_PREVIEW_MARKER_MS = 5_000;
 const DEFAULT_PREVIEW_WORKER_COUNT = 2;
 const MIN_PREVIEW_WORKER_COUNT = 1;
 const MAX_PREVIEW_WORKER_COUNT = 8;
@@ -40,7 +40,8 @@ const TRANSCRIPTION_INFERENCE_MODE_STORAGE_KEY = 'meetingRecorder.transcriptionI
 
 interface LivePreviewQueueItem {
   snapshot: RecordedAudio;
-  snapshotEndMs: number;
+  markerStartMs: number;
+  markerEndMs: number;
 }
 
 interface TranscriptionReviewState {
@@ -92,36 +93,40 @@ function mergeSpeakers(currentSpeakers: SpeakerProfile[], nextSpeakers: SpeakerP
   return [...speakerMap.values()];
 }
 
-function createContiguousPreviewQueueItem(
+function createContiguousPreviewQueueItems(
   snapshot: RecordedAudio,
   lastQueuedEndMs: number
-): LivePreviewQueueItem | null {
+): LivePreviewQueueItem[] {
   const snapshotStartMs = Math.max(0, Math.round(snapshot.startOffsetMs ?? 0));
-  const snapshotEndMs = snapshotStartMs + Math.max(1, Math.round(snapshot.durationMs));
+  const explicitEndMs = typeof snapshot.endOffsetMs === 'number' ? Math.round(snapshot.endOffsetMs) : undefined;
+  const snapshotEndMs = Math.max(
+    snapshotStartMs + 1,
+    explicitEndMs ?? snapshotStartMs + Math.max(1, Math.round(snapshot.durationMs))
+  );
+  let markerStartMs = lastQueuedEndMs > 0 ? lastQueuedEndMs : snapshotStartMs;
+  const queueItems: LivePreviewQueueItem[] = [];
 
-  if (lastQueuedEndMs <= 0) {
-    return {
+  while (markerStartMs < snapshotEndMs) {
+    const markerEndMs = Math.min(snapshotEndMs, markerStartMs + LIVE_PREVIEW_MARKER_MS);
+
+    if (markerEndMs <= markerStartMs) {
+      break;
+    }
+
+    queueItems.push({
       snapshot: {
         ...snapshot,
-        startOffsetMs: snapshotStartMs,
-        durationMs: snapshotEndMs - snapshotStartMs
+        startOffsetMs: markerStartMs,
+        endOffsetMs: markerEndMs,
+        durationMs: markerEndMs - markerStartMs
       },
-      snapshotEndMs
-    };
+      markerStartMs,
+      markerEndMs
+    });
+    markerStartMs = markerEndMs;
   }
 
-  if (snapshotEndMs <= lastQueuedEndMs) {
-    return null;
-  }
-
-  return {
-    snapshot: {
-      ...snapshot,
-      startOffsetMs: lastQueuedEndMs,
-      durationMs: snapshotEndMs - lastQueuedEndMs
-    },
-    snapshotEndMs
-  };
+  return queueItems;
 }
 
 function createTranscriptionReviewState(
@@ -563,7 +568,7 @@ export function App(): JSX.Element {
           }
 
           const hasPreviewSegments = previewResult.segments.length > 0;
-          const previewStartMs = Math.max(0, Math.round(queuedPreview.snapshot.startOffsetMs ?? 0));
+          const previewStartMs = queuedPreview.markerStartMs;
           const shiftedSegments = previewResult.segments.map((segment) => ({
             ...segment,
             id: createPreviewSegmentId(previewStartMs, segment.id),
@@ -575,7 +580,7 @@ export function App(): JSX.Element {
             : currentSession.segments;
           const nextSession: MeetingSession = {
             ...currentSession,
-            durationMs: Math.max(currentSession.durationMs, queuedPreview.snapshotEndMs),
+            durationMs: Math.max(currentSession.durationMs, queuedPreview.markerEndMs),
             speakers: hasPreviewSegments
               ? mergeSpeakers(currentSession.speakers, previewResult.speakers)
               : currentSession.speakers,
@@ -677,13 +682,29 @@ export function App(): JSX.Element {
             livePreviewRunIdRef.current === runId &&
             recordingStatusRef.current === 'recording'
           ) {
-            const queueItem = createContiguousPreviewQueueItem(snapshot, livePreviewLastQueuedEndRef.current);
+            const queueItems = createContiguousPreviewQueueItems(snapshot, livePreviewLastQueuedEndRef.current);
 
-            if (queueItem) {
-              livePreviewQueueRef.current.push(queueItem);
-              livePreviewLastQueuedEndRef.current = queueItem.snapshotEndMs;
+            if (queueItems.length > 0) {
+              livePreviewQueueRef.current.push(...queueItems);
+              livePreviewLastQueuedEndRef.current = queueItems[queueItems.length - 1].markerEndMs;
               syncLivePreviewQueueStats();
             }
+          } else if (
+            livePreviewProgressEnabledRef.current &&
+            livePreviewInFlightCountRef.current === 0 &&
+            livePreviewQueueRef.current.length === 0
+          ) {
+            setLivePreviewProgress({
+              sessionId,
+              mode: 'preview',
+              stage: 'prepare',
+              progress: 0,
+              message: '다음 실시간 전사 구간 수집 중'
+            });
+          }
+        } catch (error) {
+          if (isLivePreviewRunUsable(runId)) {
+            setAppError(error instanceof Error ? error.message : '실시간 전사 구간을 준비하지 못했습니다.');
           }
         } finally {
           if (livePreviewRunIdRef.current === runId) {
@@ -717,16 +738,23 @@ export function App(): JSX.Element {
     livePreviewAcceptingSnapshotsRef.current = true;
     livePreviewProgressEnabledRef.current = true;
     setLivePreviewWorkerProgress({});
+    setIsLivePreviewing(true);
+    setLivePreviewProgress({
+      sessionId,
+      mode: 'preview',
+      stage: 'prepare',
+      progress: 0,
+      message: '실시간 전사 구간 수집 중'
+    });
     syncLivePreviewQueueStats();
 
     const requestPreview = () => {
       void runLivePreview(sessionId, runId);
     };
-    const initialTimerId = window.setTimeout(requestPreview, LIVE_PREVIEW_INITIAL_DELAY_MS);
+    requestPreview();
     const intervalTimerId = window.setInterval(requestPreview, LIVE_PREVIEW_INTERVAL_MS);
 
     return () => {
-      window.clearTimeout(initialTimerId);
       window.clearInterval(intervalTimerId);
       livePreviewAcceptingSnapshotsRef.current = false;
 

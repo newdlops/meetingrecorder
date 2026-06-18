@@ -8,14 +8,13 @@
 - sherpa-onnx: token이 필요 없는 로컬 ONNX 화자분리 모델을 제공
 - 오프라인 동작: 릴리즈 전에 모델 파일을 앱 자산으로 포함하면 최종 사용자는 네트워크와 터미널 설정 없이 사용 가능
 
-## 설치
+## 배포
 
 ```bash
-npm run setup:standalone
-npm run dist
+npm run build:prod
 ```
 
-`setup:standalone`은 `.venv-stt` Python 엔진과 `engines/models` 모델 자산을 준비합니다. `dist`는 이 자산을 앱의 resources 폴더에 포함합니다.
+`build:prod`는 `.venv-stt` Python 엔진과 `engines/models` 모델 자산을 먼저 준비한 뒤 `verify:engine-bundle`로 누락 여부를 검사합니다. 검증을 통과한 자산은 Electron 앱의 resources 폴더에 포함되므로 최종 사용자는 Python, STT 모델, 화자분리 모델을 별도로 설치하지 않습니다.
 
 ## 주요 환경변수
 

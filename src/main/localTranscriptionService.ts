@@ -143,10 +143,11 @@ export class LocalTranscriptionService {
     }
 
     const startMs = Math.max(0, Math.round(request.audioStartOffsetMs ?? 0));
-    const durationMs = Math.max(
-      1,
-      Math.round(request.audioDurationMs ?? Math.max(1, (request.audioEndOffsetMs ?? startMs + 1) - startMs))
-    );
+    const endMs =
+      typeof request.audioEndOffsetMs === 'number'
+        ? Math.max(startMs + 1, Math.round(request.audioEndOffsetMs))
+        : startMs + Math.max(1, Math.round(request.audioDurationMs ?? 1));
+    const durationMs = Math.max(1, endMs - startMs);
     const tempDirectory = await mkdtemp(path.join(tmpdir(), 'meeting-recorder-preview-chunk-'));
     const audioPath = path.join(tempDirectory, 'preview-chunk.wav');
 

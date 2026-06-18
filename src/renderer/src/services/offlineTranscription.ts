@@ -40,6 +40,12 @@ export async function transcribeRecordedAudio(
       audioData = new Uint8Array(audioBuffer);
     }
 
+    const audioEndOffsetMs =
+      recordedAudio.endOffsetMs ??
+      (typeof recordedAudio.startOffsetMs === 'number'
+        ? recordedAudio.startOffsetMs + recordedAudio.durationMs
+        : undefined);
+
     const result = await window.meetingRecorder.transcribeOffline({
       sessionId,
       audioData,
@@ -47,10 +53,7 @@ export async function transcribeRecordedAudio(
       audioMimeType: recordedAudio.mimeType,
       audioDurationMs: recordedAudio.durationMs,
       audioStartOffsetMs: recordedAudio.startOffsetMs,
-      audioEndOffsetMs:
-        typeof recordedAudio.startOffsetMs === 'number'
-          ? recordedAudio.startOffsetMs + recordedAudio.durationMs
-          : undefined,
+      audioEndOffsetMs,
       mode: options.mode ?? 'final',
       minSpeakers: options.minSpeakers,
       maxSpeakers: options.maxSpeakers,
