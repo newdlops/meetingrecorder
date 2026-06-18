@@ -26,7 +26,7 @@ const ENGINE_OPTIONS: Array<{
   {
     value: 'whisperCpp',
     label: 'whisper.cpp',
-    tooltip: 'full precision large-v3 모델을 쓰는 추가 엔진'
+    tooltip: 'full precision large-v3 모델을 쓰는 추가 엔진. Whisper 구조상 무음 구간에서 환각 전사가 있을 수 있음'
   }
 ];
 

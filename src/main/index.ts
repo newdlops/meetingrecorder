@@ -39,11 +39,17 @@ function createMainWindow(): void {
 
 // 앱 데이터 폴더 아래에 회의 저장소를 만들고 IPC를 연결한다.
 async function bootstrap(): Promise<void> {
-  const store = new MeetingSessionStore(path.join(app.getPath('userData'), 'meetings'));
-  recordingFileService = new RecordingFileService();
+  const userDataPath = app.getPath('userData');
+  const store = new MeetingSessionStore(path.join(userDataPath, 'meetings'));
+  recordingFileService = new RecordingFileService(path.join(userDataPath, 'recording-recovery'));
   transcriptionService = new LocalTranscriptionService(undefined, recordingFileService);
   systemAudioCaptureService = new SystemAudioCaptureService();
   await store.init();
+  await recordingFileService.init();
+  const recoveredRecordings = await recordingFileService.listRecoverableRecordings();
+  const handledRecoveredRecordingIds = await store.recoverInterruptedRecordings(recoveredRecordings);
+
+  await Promise.all(handledRecoveredRecordingIds.map((recordingId) => recordingFileService.discard(recordingId)));
   registerIpcHandlers(store, transcriptionService, recordingFileService, systemAudioCaptureService);
   createMainWindow();
   transcriptionService.warmUp().catch((error) => console.error(error));

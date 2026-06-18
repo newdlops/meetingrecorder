@@ -1,5 +1,6 @@
-import { copyFile, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import type { RecoverableRecordingFile } from './recordingFileService';
 import type {
   AudioFilePayload,
   DeleteSessionResult,
@@ -28,6 +29,50 @@ export class MeetingSessionStore {
   // 앱 시작 시 저장 루트 폴더를 준비한다.
   async init(): Promise<void> {
     await mkdir(this.baseDirectory, { recursive: true });
+  }
+
+  // 비정상 종료 뒤 복구 폴더에 남은 녹음 파일을 회의 세션으로 승격한다.
+  async recoverInterruptedRecordings(recordings: RecoverableRecordingFile[]): Promise<string[]> {
+    const handledRecordingIds: string[] = [];
+
+    await this.init();
+
+    for (const recording of recordings) {
+      assertSafeSessionId(recording.recordingId);
+
+      const existingSession = await this.readSession(recording.recordingId);
+
+      if (existingSession?.audioFileName) {
+        handledRecordingIds.push(recording.recordingId);
+        continue;
+      }
+
+      const recoveredAt = new Date().toISOString();
+      const startedAt = normalizeIsoDate(recording.startedAt) ?? recoveredAt;
+      const audioFileName = getAudioFileName(recording.audioMimeType);
+      const sessionDirectory = this.getSessionDirectory(recording.recordingId);
+      const audioPath = path.join(sessionDirectory, audioFileName);
+      const session = normalizeSession({
+        id: recording.recordingId,
+        title: buildRecoveredSessionTitle(startedAt),
+        createdAt: startedAt,
+        updatedAt: recoveredAt,
+        durationMs: recording.durationMs,
+        audioFileName,
+        audioMimeType: recording.audioMimeType,
+        speakers: [],
+        segments: [],
+        transcriptText: '',
+        memo: '예상치 못한 종료 후 복구된 녹음입니다. 필요한 경우 최종 고품질 보정을 시작하세요.'
+      });
+
+      await mkdir(sessionDirectory, { recursive: true });
+      await moveFile(recording.filePath, audioPath);
+      await this.writeSession(session);
+      handledRecordingIds.push(recording.recordingId);
+    }
+
+    return handledRecordingIds;
   }
 
   // 저장된 회의 목록을 최신 수정순으로 반환한다.
@@ -304,6 +349,46 @@ function getAudioFileMimeType(fileName: string): string {
   }
 
   return 'audio/webm';
+}
+
+async function moveFile(sourcePath: string, targetPath: string): Promise<void> {
+  try {
+    await rename(sourcePath, targetPath);
+  } catch (error) {
+    if (!isCrossDeviceRenameError(error)) {
+      throw error;
+    }
+
+    await copyFile(sourcePath, targetPath);
+    await rm(sourcePath, { force: true });
+  }
+}
+
+function isCrossDeviceRenameError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as NodeJS.ErrnoException).code === 'EXDEV'
+  );
+}
+
+function normalizeIsoDate(value: string): string | undefined {
+  const date = new Date(value);
+
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+function buildRecoveredSessionTitle(startedAt: string): string {
+  const date = new Date(startedAt);
+
+  return `복구된 회의 ${date.toLocaleString('ko-KR', {
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit'
+  })}`;
 }
 
 // 세션 ID가 경로 밖으로 나가지 못하도록 허용 문자를 제한한다.

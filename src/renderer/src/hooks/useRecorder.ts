@@ -12,8 +12,14 @@ export interface RecordedAudio {
 
 export type RecorderInputSource = 'microphone' | 'system';
 
+export interface MicrophoneDevice {
+  deviceId: string;
+  label: string;
+}
+
 export interface RecorderSettings {
   sensitivity: number;
+  microphoneDeviceId: string;
   captureDistantSpeech: boolean;
   inputSource: RecorderInputSource;
   liveTranscriptionEnabled: boolean;
@@ -27,6 +33,9 @@ const PREVIEW_SEGMENT_MS = 5_000;
 const PCM_SAMPLE_RATE = 16_000;
 const PCM_BYTES_PER_SAMPLE = 2;
 const PCM_FLUSH_INTERVAL_MS = 1_000;
+export const MIC_SENSITIVITY_MIN = 0.5;
+export const MIC_SENSITIVITY_MAX = 16;
+export const MIC_SENSITIVITY_STEP = 0.1;
 
 function concatUint8Arrays(chunks: Uint8Array[]): Uint8Array {
   const byteLength = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
@@ -43,17 +52,30 @@ function concatUint8Arrays(chunks: Uint8Array[]): Uint8Array {
 
 function encodePcm16(samples: Float32Array, inputSampleRate: number): Uint8Array {
   const ratio = inputSampleRate / PCM_SAMPLE_RATE;
-  const outputLength = Math.max(1, Math.floor(samples.length / ratio));
+  const outputLength = Math.max(1, Math.round(samples.length / ratio));
   const output = new Uint8Array(outputLength * PCM_BYTES_PER_SAMPLE);
   const view = new DataView(output.buffer);
 
   for (let index = 0; index < outputLength; index += 1) {
-    const sourceIndex = Math.min(samples.length - 1, Math.floor(index * ratio));
-    const sample = Math.max(-1, Math.min(1, samples[sourceIndex] ?? 0));
+    const sourcePosition = Math.min(samples.length - 1, index * ratio);
+    const sourceIndex = Math.floor(sourcePosition);
+    const nextSourceIndex = Math.min(samples.length - 1, sourceIndex + 1);
+    const blend = sourcePosition - sourceIndex;
+    const interpolatedSample =
+      (samples[sourceIndex] ?? 0) * (1 - blend) + (samples[nextSourceIndex] ?? 0) * blend;
+    const sample = Math.max(-1, Math.min(1, interpolatedSample));
     view.setInt16(index * PCM_BYTES_PER_SAMPLE, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
   }
 
   return output;
+}
+
+function clampMicrophoneSensitivity(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 1;
+  }
+
+  return Math.min(MIC_SENSITIVITY_MAX, Math.max(MIC_SENSITIVITY_MIN, value));
 }
 
 // 브라우저 Web Audio API를 React 상태로 감싼 녹음 훅이다.
@@ -63,6 +85,7 @@ export function useRecorder() {
   const audioContextRef = useRef<AudioContext | null>(null);
   const gainNodeRef = useRef<GainNode | null>(null);
   const analyserNodeRef = useRef<AnalyserNode | null>(null);
+  const processedAudioNodeRef = useRef<AudioNode | null>(null);
   const pcmProcessorRef = useRef<ScriptProcessorNode | null>(null);
   const livePreviewEnabledRef = useRef(false);
   const previewMarkerInFlightRef = useRef(false);
@@ -93,7 +116,7 @@ export function useRecorder() {
 
   // 사용자가 조절한 감도 값을 현재 녹음 그래프의 gain에 즉시 반영한다.
   const updateSensitivity = useCallback((nextSensitivity: number): void => {
-    const normalizedSensitivity = Math.min(4, Math.max(0.5, nextSensitivity));
+    const normalizedSensitivity = clampMicrophoneSensitivity(nextSensitivity);
     const gainNode = gainNodeRef.current;
 
     if (gainNode) {
@@ -106,19 +129,45 @@ export function useRecorder() {
     async (stream: MediaStream, settings: RecorderSettings): Promise<MediaStream> => {
       const audioContext = new AudioContext();
       const source = audioContext.createMediaStreamSource(stream);
+      const highPassFilter = audioContext.createBiquadFilter();
+      const lowPassFilter = audioContext.createBiquadFilter();
       const gainNode = audioContext.createGain();
+      const speechCompressor = audioContext.createDynamicsCompressor();
+      const peakLimiter = audioContext.createDynamicsCompressor();
       const analyserNode = audioContext.createAnalyser();
       const destination = audioContext.createMediaStreamDestination();
 
+      highPassFilter.type = 'highpass';
+      highPassFilter.frequency.value = settings.captureDistantSpeech ? 70 : 90;
+      highPassFilter.Q.value = 0.7;
+      lowPassFilter.type = 'lowpass';
+      lowPassFilter.frequency.value = 7_600;
+      lowPassFilter.Q.value = 0.7;
+      speechCompressor.threshold.value = -34;
+      speechCompressor.knee.value = 24;
+      speechCompressor.ratio.value = 3;
+      speechCompressor.attack.value = 0.003;
+      speechCompressor.release.value = 0.25;
+      peakLimiter.threshold.value = -3;
+      peakLimiter.knee.value = 0;
+      peakLimiter.ratio.value = 20;
+      peakLimiter.attack.value = 0.001;
+      peakLimiter.release.value = 0.05;
       analyserNode.fftSize = 1024;
-      gainNode.gain.value = settings.sensitivity;
-      source.connect(gainNode);
-      gainNode.connect(analyserNode);
+      gainNode.gain.value = clampMicrophoneSensitivity(settings.sensitivity);
+
+      source.connect(highPassFilter);
+      highPassFilter.connect(lowPassFilter);
+      lowPassFilter.connect(gainNode);
+      gainNode.connect(speechCompressor);
+      speechCompressor.connect(peakLimiter);
+      peakLimiter.connect(analyserNode);
       analyserNode.connect(destination);
 
       audioContextRef.current = audioContext;
       gainNodeRef.current = gainNode;
       analyserNodeRef.current = analyserNode;
+      processedAudioNodeRef.current = peakLimiter;
       updateSensitivity(settings.sensitivity);
       await audioContext.resume();
 
@@ -211,20 +260,29 @@ export function useRecorder() {
       throw new Error('이 환경에서는 마이크 녹음을 사용할 수 없습니다.');
     }
 
+    const audioConstraints: MediaTrackConstraints = {
+      channelCount: { ideal: 1 },
+      sampleRate: { ideal: 48_000 },
+      sampleSize: { ideal: 16 },
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    };
+
+    if (settings.microphoneDeviceId) {
+      audioConstraints.deviceId = { exact: settings.microphoneDeviceId };
+    }
+
     return navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: !settings.captureDistantSpeech,
-        noiseSuppression: !settings.captureDistantSpeech,
-        autoGainControl: true
-      }
+      audio: audioConstraints
     });
   }, []);
 
   const startPcmCapture = useCallback((): void => {
     const audioContext = audioContextRef.current;
-    const gainNode = gainNodeRef.current;
+    const processedAudioNode = processedAudioNodeRef.current;
 
-    if (!audioContext || !gainNode) {
+    if (!audioContext || !processedAudioNode) {
       throw new Error('마이크 오디오 그래프를 준비하지 못했습니다.');
     }
 
@@ -239,7 +297,7 @@ export function useRecorder() {
       handlePcmSamples(input, audioContext.sampleRate);
     };
 
-    gainNode.connect(processor);
+    processedAudioNode.connect(processor);
     processor.connect(audioContext.destination);
   }, [handlePcmSamples]);
 
@@ -369,6 +427,7 @@ export function useRecorder() {
       audioContextRef.current = null;
       gainNodeRef.current = null;
       analyserNodeRef.current = null;
+      processedAudioNodeRef.current = null;
       recordingIdRef.current = '';
       livePreviewEnabledRef.current = false;
       previewMarkerInFlightRef.current = false;

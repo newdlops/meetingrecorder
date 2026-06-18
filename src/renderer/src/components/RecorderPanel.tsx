@@ -3,13 +3,20 @@ import {
   MessageSquareText,
   Mic,
   MonitorSpeaker,
+  RefreshCw,
   SlidersHorizontal,
   Square,
   Users,
   Waves
 } from 'lucide-react';
 import type { RecordingStatus } from '../../../shared/types';
-import type { RecorderInputSource } from '../hooks/useRecorder';
+import {
+  MIC_SENSITIVITY_MAX,
+  MIC_SENSITIVITY_MIN,
+  MIC_SENSITIVITY_STEP,
+  type MicrophoneDevice,
+  type RecorderInputSource
+} from '../hooks/useRecorder';
 import { formatDuration } from '../utils/time';
 
 interface RecorderPanelProps {
@@ -19,6 +26,8 @@ interface RecorderPanelProps {
   sensitivity: number;
   inputLevel: number;
   inputSource: RecorderInputSource;
+  microphoneDeviceId: string;
+  microphoneDevices: MicrophoneDevice[];
   captureDistantSpeech: boolean;
   liveTranscriptionEnabled: boolean;
   expectedSpeakerCount: number;
@@ -27,6 +36,8 @@ interface RecorderPanelProps {
   progressMessage?: string;
   progressPercent?: number;
   onSensitivityChange(value: number): void;
+  onMicrophoneDeviceChange(value: string): void;
+  onRefreshMicrophoneDevices(): void;
   onInputSourceChange(value: RecorderInputSource): void;
   onCaptureDistantSpeechChange(value: boolean): void;
   onLiveTranscriptionEnabledChange(value: boolean): void;
@@ -43,6 +54,8 @@ export function RecorderPanel({
   sensitivity,
   inputLevel,
   inputSource,
+  microphoneDeviceId,
+  microphoneDevices,
   captureDistantSpeech,
   liveTranscriptionEnabled,
   expectedSpeakerCount,
@@ -51,6 +64,8 @@ export function RecorderPanel({
   progressMessage,
   progressPercent,
   onSensitivityChange,
+  onMicrophoneDeviceChange,
+  onRefreshMicrophoneDevices,
   onInputSourceChange,
   onCaptureDistantSpeechChange,
   onLiveTranscriptionEnabledChange,
@@ -120,15 +135,43 @@ export function RecorderPanel({
             시스템
           </button>
         </div>
+        <label className="microphoneDeviceControl">
+          <span>
+            <Mic size={15} />
+            마이크
+          </span>
+          <select
+            disabled={isRecording || isSaving || inputSource === 'system'}
+            value={microphoneDeviceId}
+            onChange={(event) => onMicrophoneDeviceChange(event.target.value)}
+          >
+            <option value="">시스템 기본</option>
+            {microphoneDevices.map((device) => (
+              <option key={device.deviceId || device.label} value={device.deviceId}>
+                {device.label}
+              </option>
+            ))}
+          </select>
+          <button
+            aria-label="마이크 목록 새로고침"
+            className="iconButton small"
+            disabled={isRecording || isSaving || inputSource === 'system'}
+            title="마이크 목록 새로고침"
+            type="button"
+            onClick={onRefreshMicrophoneDevices}
+          >
+            <RefreshCw size={15} />
+          </button>
+        </label>
         <label className="sensitivityControl">
           <span>
             <SlidersHorizontal size={15} />
-            감도 {sensitivity.toFixed(1)}x
+            감도/볼륨 {sensitivity.toFixed(1)}x
           </span>
           <input
-            max="4"
-            min="0.5"
-            step="0.1"
+            max={MIC_SENSITIVITY_MAX}
+            min={MIC_SENSITIVITY_MIN}
+            step={MIC_SENSITIVITY_STEP}
             type="range"
             value={sensitivity}
             onChange={(event) => onSensitivityChange(Number(event.target.value))}

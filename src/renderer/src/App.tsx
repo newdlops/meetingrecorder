@@ -22,7 +22,13 @@ import {
   type TranscriptionReviewChoice,
   type TranscriptionReviewItem
 } from './components/TranscriptionReviewPanel';
-import { type RecordedAudio, type RecorderInputSource, type RecorderSettings, useRecorder } from './hooks/useRecorder';
+import {
+  type MicrophoneDevice,
+  type RecordedAudio,
+  type RecorderInputSource,
+  type RecorderSettings,
+  useRecorder
+} from './hooks/useRecorder';
 import { createDraftMeetingSession } from './services/meetingFactory';
 import { transcribeRecordedAudio } from './services/offlineTranscription';
 
@@ -40,6 +46,7 @@ const TRANSCRIPTION_ENGINE_STORAGE_KEY = 'meetingRecorder.transcriptionEngine';
 const DEFAULT_TRANSCRIPTION_INFERENCE_MODE: TranscriptionInferenceMode = 'literal';
 const FINAL_REPROCESS_INFERENCE_MODE: TranscriptionInferenceMode = 'contextual';
 const TRANSCRIPTION_INFERENCE_MODE_STORAGE_KEY = 'meetingRecorder.transcriptionInferenceMode';
+const MICROPHONE_DEVICE_STORAGE_KEY = 'meetingRecorder.microphoneDeviceId';
 
 interface LivePreviewQueueItem {
   snapshot: RecordedAudio;
@@ -296,6 +303,35 @@ function writeStoredTranscriptionInferenceMode(value: TranscriptionInferenceMode
   }
 }
 
+function readStoredMicrophoneDeviceId(): string {
+  try {
+    return window.localStorage.getItem(MICROPHONE_DEVICE_STORAGE_KEY) ?? '';
+  } catch {
+    return '';
+  }
+}
+
+function writeStoredMicrophoneDeviceId(value: string): void {
+  try {
+    if (value) {
+      window.localStorage.setItem(MICROPHONE_DEVICE_STORAGE_KEY, value);
+    } else {
+      window.localStorage.removeItem(MICROPHONE_DEVICE_STORAGE_KEY);
+    }
+  } catch {
+    // 설정 저장 실패는 녹음/전사 동작을 막지 않는다.
+  }
+}
+
+function normalizeMicrophoneDevices(devices: MediaDeviceInfo[]): MicrophoneDevice[] {
+  return devices
+    .filter((device) => device.kind === 'audioinput' && device.deviceId)
+    .map((device, index) => ({
+      deviceId: device.deviceId,
+      label: device.label || `마이크 ${index + 1}`
+    }));
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     window.setTimeout(resolve, ms);
@@ -339,6 +375,7 @@ export function App(): JSX.Element {
   const [isLivePreviewing, setIsLivePreviewing] = useState(false);
   const [recorderSettings, setRecorderSettings] = useState<RecorderSettings>({
     sensitivity: 1.8,
+    microphoneDeviceId: readStoredMicrophoneDeviceId(),
     captureDistantSpeech: true,
     inputSource: 'microphone',
     liveTranscriptionEnabled: false,
@@ -348,6 +385,7 @@ export function App(): JSX.Element {
     transcriptionInferenceMode: readStoredTranscriptionInferenceMode()
   });
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
+  const [microphoneDevices, setMicrophoneDevices] = useState<MicrophoneDevice[]>([]);
   const [playingSegmentId, setPlayingSegmentId] = useState<string | null>(null);
   const [livePreviewProgress, setLivePreviewProgress] = useState<TranscriptionProgressEvent | null>(null);
   const [livePreviewQueueStats, setLivePreviewQueueStats] = useState<LivePreviewQueueStats>({
@@ -838,6 +876,50 @@ export function App(): JSX.Element {
     setRecorderSettings((currentSettings) => ({ ...currentSettings, captureDistantSpeech }));
   }, []);
 
+  const refreshMicrophoneDevices = useCallback(async () => {
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      setMicrophoneDevices([]);
+      return;
+    }
+
+    try {
+      const devices = normalizeMicrophoneDevices(await navigator.mediaDevices.enumerateDevices());
+      setMicrophoneDevices(devices);
+      setRecorderSettings((currentSettings) => {
+        if (
+          currentSettings.microphoneDeviceId &&
+          devices.length > 0 &&
+          !devices.some((device) => device.deviceId === currentSettings.microphoneDeviceId)
+        ) {
+          writeStoredMicrophoneDeviceId('');
+          return { ...currentSettings, microphoneDeviceId: '' };
+        }
+
+        return currentSettings;
+      });
+    } catch {
+      setMicrophoneDevices([]);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshMicrophoneDevices();
+
+    if (!navigator.mediaDevices?.addEventListener) {
+      return undefined;
+    }
+
+    navigator.mediaDevices.addEventListener('devicechange', refreshMicrophoneDevices);
+    return () => {
+      navigator.mediaDevices.removeEventListener('devicechange', refreshMicrophoneDevices);
+    };
+  }, [refreshMicrophoneDevices]);
+
+  const handleMicrophoneDeviceChange = useCallback((microphoneDeviceId: string) => {
+    writeStoredMicrophoneDeviceId(microphoneDeviceId);
+    setRecorderSettings((currentSettings) => ({ ...currentSettings, microphoneDeviceId }));
+  }, []);
+
   // 테스트 녹음 대상이 되는 입력 소스를 마이크 또는 시스템 오디오로 전환한다.
   const handleInputSourceChange = useCallback((inputSource: RecorderInputSource) => {
     setRecorderSettings((settings) => ({ ...settings, inputSource }));
@@ -893,12 +975,13 @@ export function App(): JSX.Element {
     try {
       const nextSession = createDraftMeetingSession();
       await startRecording(recorderSettings, nextSession.id);
+      void refreshMicrophoneDevices();
       setSelectedSession(null);
       setDraftSession(nextSession);
     } catch (error) {
       setAppError(error instanceof Error ? error.message : '녹음을 시작할 수 없습니다.');
     }
-  }, [recorderSettings, startRecording]);
+  }, [recorderSettings, refreshMicrophoneDevices, startRecording]);
 
   // 녹음을 종료하면 실시간 미리보기 내용 그대로 저장하고, 최종 고품질 보정은 사용자가 나중에 시작한다.
   const handleStopRecording = useCallback(async () => {
@@ -1372,6 +1455,8 @@ export function App(): JSX.Element {
           inputLevel={inputLevel}
           inputSource={recorderSettings.inputSource}
           liveTranscriptionEnabled={recorderSettings.liveTranscriptionEnabled}
+          microphoneDeviceId={recorderSettings.microphoneDeviceId}
+          microphoneDevices={microphoneDevices}
           expectedSpeakerCount={recorderSettings.expectedSpeakerCount}
           progressPercent={finalTranscriptionProgress?.progress}
           progressMessage={finalTranscriptionProgress?.message}
@@ -1391,6 +1476,8 @@ export function App(): JSX.Element {
           onExpectedSpeakerCountChange={handleExpectedSpeakerCountChange}
           onInputSourceChange={handleInputSourceChange}
           onLiveTranscriptionEnabledChange={handleLiveTranscriptionEnabledChange}
+          onMicrophoneDeviceChange={handleMicrophoneDeviceChange}
+          onRefreshMicrophoneDevices={refreshMicrophoneDevices}
           onSensitivityChange={handleSensitivityChange}
           onStart={handleStartRecording}
           onStop={handleStopRecording}

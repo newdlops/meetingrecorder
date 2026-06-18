@@ -226,7 +226,7 @@ textarea:disabled {
 
 .recorderControls {
   display: grid; grid-column: 1 / -1;
-  grid-template-columns: auto minmax(180px, 1fr) auto auto auto minmax(120px, 180px);
+  grid-template-columns: auto minmax(180px, 260px) minmax(180px, 1fr) auto auto auto minmax(120px, 180px);
   gap: 14px; align-items: center; padding-top: 4px;
 }
 
@@ -251,6 +251,8 @@ textarea:disabled {
 }
 
 .sensitivityControl span,
+.microphoneDeviceControl,
+.microphoneDeviceControl span,
 .distantSpeechToggle,
 .speakerCountControl,
 .speakerCountControl span,
@@ -261,6 +263,24 @@ textarea:disabled {
   color: #526265;
   font-size: 13px;
   font-weight: 700;
+}
+
+.microphoneDeviceControl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) 32px;
+  gap: 8px;
+  align-items: center;
+  min-width: 0;
+}
+
+.microphoneDeviceControl select {
+  min-width: 0;
+  min-height: 32px;
+  padding: 0 28px 0 10px;
+  color: #263234;
+  background: #ffffff;
+  border: 1px solid #c9d8db;
+  border-radius: 8px;
 }
 
 .speakerCountControl {
@@ -285,6 +305,25 @@ textarea:disabled {
 .liveTranscriptToggle input {
   width: 16px;
   height: 16px;
+}
+
+.iconButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: #526265;
+  background: #ffffff;
+  border: 1px solid #c9d8db;
+  border-radius: 8px;
+}
+
+.iconButton.small {
+  width: 32px;
+  height: 32px;
+}
+
+.iconButton:disabled {
+  opacity: 0.45;
 }
 
 .inputLevelMeter {

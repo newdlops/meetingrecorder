@@ -1,7 +1,7 @@
 import { app } from 'electron';
 import { spawn } from 'node:child_process';
 import { createReadStream, existsSync } from 'node:fs';
-import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
@@ -31,6 +31,24 @@ const FINAL_WORKER_ID = 'final-1';
 const FINAL_WORKER_LABEL = '최종 전사';
 const DEFAULT_TRANSCRIPTION_ENGINE: TranscriptionEngine = 'whisperx';
 const DEFAULT_TRANSCRIPTION_INFERENCE_MODE: TranscriptionInferenceMode = 'literal';
+const SILENCE_GATE_WORKER_ID = 'silence-gate';
+const SILENCE_GATE_WORKER_LABEL = '무음 감지';
+const PREVIEW_SPEAKER = { id: 'speaker-preview', name: '미리보기', color: '#607d8b' };
+const WAV_HEADER_SCAN_LIMIT_BYTES = 1024 * 1024;
+const SILENCE_ANALYSIS_FRAME_MS = 20;
+const DEFAULT_SILENCE_RMS_THRESHOLD = 0.0025;
+const DEFAULT_SILENCE_PEAK_THRESHOLD = 0.02;
+const DEFAULT_SILENCE_ACTIVE_FRAME_THRESHOLD = 0.012;
+const DEFAULT_SILENCE_ACTIVE_FRAME_RATIO = 0.003;
+const DEFAULT_SILENCE_SPEECH_FRAME_RMS_THRESHOLD = 0.006;
+const DEFAULT_SILENCE_SPEECH_FRAME_RATIO = 0.02;
+const DEFAULT_SILENCE_MIN_ZERO_CROSSING_RATE = 0.005;
+const DEFAULT_SILENCE_MAX_ZERO_CROSSING_RATE = 0.35;
+const DEFAULT_SILENCE_SPEECH_SNR_RATIO = 1.65;
+const DEFAULT_SILENCE_SPEECH_SNR_MARGIN = 0.002;
+const DEFAULT_SILENCE_MIN_DYNAMIC_RANGE_RATIO = 1.25;
+const DEFAULT_SILENCE_STEADY_ACTIVE_FRAME_RATIO = 0.8;
+const DEFAULT_SILENCE_STEADY_MAX_RMS_VARIATION = 0.08;
 
 type TranscriptionWorkerPurpose = 'final' | 'preview';
 
@@ -39,6 +57,27 @@ interface ManagedPreviewWorker {
   label: string;
   worker: PersistentTranscriptionWorker;
   activeJobs: number;
+}
+
+interface WavPcmInfo {
+  dataOffset: number;
+  dataBytes: number;
+  audioFormat: number;
+  channels: number;
+  sampleRate: number;
+  bitsPerSample: number;
+  blockAlign: number;
+}
+
+interface AudioEnergyStats {
+  durationMs: number;
+  rms: number;
+  peak: number;
+  activeFrameRatio: number;
+  speechLikeFrameRatio: number;
+  noiseFloorRms: number;
+  dynamicRangeRatio: number;
+  rmsVariation: number;
 }
 
 // WhisperX 기반 Python 상주 worker를 통해 오프라인 전사/화자분리 결과를 만든다.
@@ -191,6 +230,10 @@ export class LocalTranscriptionService {
       return this.transcribeFinalAudioInChunks(request, audioPath, onProgress);
     }
 
+    if (await this.shouldSkipSilentTranscription(audioPath)) {
+      return this.createSilentTranscriptionResult(request, isPreviewRequest, onProgress);
+    }
+
     const inferenceMode = this.getTranscriptionInferenceMode(request.transcriptionInferenceMode);
     const transcriptionEngine = this.getTranscriptionEngine(request.transcriptionEngine);
 
@@ -214,6 +257,10 @@ export class LocalTranscriptionService {
     audioPath: string,
     onProgress?: ProgressCallback
   ): Promise<OfflineTranscriptionResult> {
+    if (await this.shouldSkipSilentTranscription(audioPath)) {
+      return this.createSilentTranscriptionResult(request, true, onProgress);
+    }
+
     const managedWorker = this.getNextPreviewWorker(this.getPreviewWorkerCount(request.previewWorkerCount));
     const inferenceMode = this.getTranscriptionInferenceMode(request.transcriptionInferenceMode);
     const transcriptionEngine = this.getTranscriptionEngine(request.transcriptionEngine);
@@ -238,6 +285,332 @@ export class LocalTranscriptionService {
     } finally {
       managedWorker.activeJobs = Math.max(0, managedWorker.activeJobs - 1);
     }
+  }
+
+  private async shouldSkipSilentTranscription(audioPath: string): Promise<boolean> {
+    if (process.env.MEETING_RECORDER_STT_SILENCE_GATE === '0') {
+      return false;
+    }
+
+    const stats = await this.analyzeWavEnergy(audioPath);
+
+    if (!stats || stats.durationMs < 100) {
+      return false;
+    }
+
+    const hasLowEnergy = (
+      stats.rms <= this.getNumericEnv('MEETING_RECORDER_STT_SILENCE_RMS_THRESHOLD', DEFAULT_SILENCE_RMS_THRESHOLD) &&
+      stats.peak <= this.getNumericEnv('MEETING_RECORDER_STT_SILENCE_PEAK_THRESHOLD', DEFAULT_SILENCE_PEAK_THRESHOLD) &&
+      stats.activeFrameRatio <=
+        this.getNumericEnv('MEETING_RECORDER_STT_SILENCE_ACTIVE_FRAME_RATIO', DEFAULT_SILENCE_ACTIVE_FRAME_RATIO)
+    );
+    const hasAlmostNoSpeechFrames =
+      stats.speechLikeFrameRatio <=
+      this.getNumericEnv('MEETING_RECORDER_STT_SILENCE_SPEECH_FRAME_RATIO', DEFAULT_SILENCE_SPEECH_FRAME_RATIO);
+    const minDynamicRangeRatio = this.getNumericEnv(
+      'MEETING_RECORDER_STT_SILENCE_MIN_DYNAMIC_RANGE_RATIO',
+      DEFAULT_SILENCE_MIN_DYNAMIC_RANGE_RATIO
+    );
+    const hasFlatNoiseProfile =
+      stats.dynamicRangeRatio <= minDynamicRangeRatio &&
+      stats.speechLikeFrameRatio <=
+        Math.max(
+          this.getNumericEnv('MEETING_RECORDER_STT_SILENCE_SPEECH_FRAME_RATIO', DEFAULT_SILENCE_SPEECH_FRAME_RATIO) * 2,
+          0.04
+        );
+    const hasSteadyNonSpeechEnergy =
+      stats.activeFrameRatio >=
+        this.getNumericEnv('MEETING_RECORDER_STT_SILENCE_STEADY_ACTIVE_FRAME_RATIO', DEFAULT_SILENCE_STEADY_ACTIVE_FRAME_RATIO) &&
+      stats.rmsVariation <=
+        this.getNumericEnv('MEETING_RECORDER_STT_SILENCE_STEADY_MAX_RMS_VARIATION', DEFAULT_SILENCE_STEADY_MAX_RMS_VARIATION) &&
+      hasFlatNoiseProfile;
+
+    return hasLowEnergy || hasAlmostNoSpeechFrames || hasSteadyNonSpeechEnergy;
+  }
+
+  private createSilentTranscriptionResult(
+    request: OfflineTranscriptionRequest,
+    isPreviewRequest: boolean,
+    onProgress?: ProgressCallback
+  ): OfflineTranscriptionResult {
+    onProgress?.({
+      sessionId: request.sessionId,
+      mode: isPreviewRequest ? 'preview' : 'final',
+      stage: 'done',
+      progress: 100,
+      message: isPreviewRequest ? '음성 감지 대기' : '음성이 없어 전사를 건너뜀',
+      workerId: SILENCE_GATE_WORKER_ID,
+      workerLabel: SILENCE_GATE_WORKER_LABEL
+    });
+
+    return {
+      engineName: 'silence-gate-local',
+      language: DEFAULT_STT_LANGUAGE,
+      durationMs: request.audioDurationMs ?? 0,
+      speakers: isPreviewRequest ? [PREVIEW_SPEAKER] : [],
+      segments: []
+    };
+  }
+
+  private async analyzeWavEnergy(audioPath: string): Promise<AudioEnergyStats | undefined> {
+    const info = await this.readWavPcmInfo(audioPath);
+
+    if (!info || info.dataBytes <= 0) {
+      return undefined;
+    }
+
+    const bytesPerSample = info.bitsPerSample / 8;
+
+    if (!Number.isInteger(bytesPerSample) || bytesPerSample <= 0) {
+      return undefined;
+    }
+
+    const frameSampleCount = Math.max(
+      info.channels,
+      Math.round((info.sampleRate * SILENCE_ANALYSIS_FRAME_MS) / 1000) * info.channels
+    );
+    const activeFrameThreshold = this.getNumericEnv(
+      'MEETING_RECORDER_STT_SILENCE_ACTIVE_FRAME_THRESHOLD',
+      DEFAULT_SILENCE_ACTIVE_FRAME_THRESHOLD
+    );
+    const speechFrameRmsThreshold = this.getNumericEnv(
+      'MEETING_RECORDER_STT_SILENCE_SPEECH_FRAME_RMS_THRESHOLD',
+      DEFAULT_SILENCE_SPEECH_FRAME_RMS_THRESHOLD
+    );
+    const minZeroCrossingRate = this.getNumericEnv(
+      'MEETING_RECORDER_STT_SILENCE_MIN_ZERO_CROSSING_RATE',
+      DEFAULT_SILENCE_MIN_ZERO_CROSSING_RATE
+    );
+    const maxZeroCrossingRate = this.getNumericEnv(
+      'MEETING_RECORDER_STT_SILENCE_MAX_ZERO_CROSSING_RATE',
+      DEFAULT_SILENCE_MAX_ZERO_CROSSING_RATE
+    );
+    let carry = Buffer.alloc(0);
+    let squaredSum = 0;
+    let sampleCount = 0;
+    let peak = 0;
+    let frameSquaredSum = 0;
+    let framePeak = 0;
+    let frameCrossings = 0;
+    let framePreviousSample: number | undefined;
+    let frameSampleCursor = 0;
+    const frameStats: Array<{ rms: number; peak: number; zeroCrossingRate: number }> = [];
+
+    const finishFrame = () => {
+      if (frameSampleCursor <= 0) {
+        return;
+      }
+
+      const frameRms = Math.sqrt(frameSquaredSum / frameSampleCursor);
+      const zeroCrossingRate = frameCrossings / Math.max(1, frameSampleCursor - 1);
+
+      frameStats.push({ rms: frameRms, peak: framePeak, zeroCrossingRate });
+
+      frameSquaredSum = 0;
+      framePeak = 0;
+      frameCrossings = 0;
+      framePreviousSample = undefined;
+      frameSampleCursor = 0;
+    };
+
+    const stream = createReadStream(audioPath, {
+      start: info.dataOffset,
+      end: info.dataOffset + info.dataBytes - 1,
+      highWaterMark: 256 * 1024
+    });
+
+    for await (const chunk of stream) {
+      const chunkBuffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      const buffer = carry.byteLength > 0 ? Buffer.concat([carry, chunkBuffer]) : chunkBuffer;
+      const alignedLength = Math.floor(buffer.byteLength / bytesPerSample) * bytesPerSample;
+      carry = buffer.subarray(alignedLength);
+
+      for (let offset = 0; offset < alignedLength; offset += bytesPerSample) {
+        const sample = this.readNormalizedPcmSample(buffer, offset, info);
+        const magnitude = Math.abs(sample);
+        squaredSum += sample * sample;
+        sampleCount += 1;
+        peak = Math.max(peak, magnitude);
+        frameSquaredSum += sample * sample;
+        framePeak = Math.max(framePeak, magnitude);
+
+        if (
+          framePreviousSample !== undefined &&
+          Math.abs(framePreviousSample) > 0.001 &&
+          magnitude > 0.001 &&
+          Math.sign(framePreviousSample) !== Math.sign(sample)
+        ) {
+          frameCrossings += 1;
+        }
+
+        framePreviousSample = sample;
+        frameSampleCursor += 1;
+
+        if (frameSampleCursor >= frameSampleCount) {
+          finishFrame();
+        }
+      }
+    }
+
+    finishFrame();
+
+    if (sampleCount === 0) {
+      return undefined;
+    }
+
+    const frameRmsValues = frameStats.map((frame) => frame.rms);
+    const totalFrames = frameStats.length;
+    const noiseFloorRms = this.calculatePercentile(frameRmsValues, 0.2);
+    const highFrameRms = this.calculatePercentile(frameRmsValues, 0.9);
+    const speechFrameSnrThreshold = Math.max(
+      speechFrameRmsThreshold,
+      noiseFloorRms * this.getNumericEnv('MEETING_RECORDER_STT_SILENCE_SPEECH_SNR_RATIO', DEFAULT_SILENCE_SPEECH_SNR_RATIO),
+      noiseFloorRms + this.getNumericEnv('MEETING_RECORDER_STT_SILENCE_SPEECH_SNR_MARGIN', DEFAULT_SILENCE_SPEECH_SNR_MARGIN)
+    );
+    const activeFrames = frameStats.filter((frame) => frame.peak >= activeFrameThreshold).length;
+    const speechLikeFrames = frameStats.filter(
+      (frame) =>
+        frame.rms >= speechFrameSnrThreshold &&
+        frame.zeroCrossingRate >= minZeroCrossingRate &&
+        frame.zeroCrossingRate <= maxZeroCrossingRate
+    ).length;
+    const averageFrameRms =
+      totalFrames > 0 ? frameRmsValues.reduce((sum, value) => sum + value, 0) / totalFrames : 0;
+    const frameRmsVariance =
+      totalFrames > 0
+        ? frameRmsValues.reduce((sum, value) => sum + (value - averageFrameRms) ** 2, 0) / totalFrames
+        : 0;
+
+    return {
+      durationMs: Math.round((info.dataBytes / Math.max(1, info.sampleRate * info.blockAlign)) * 1000),
+      rms: Math.sqrt(squaredSum / sampleCount),
+      peak,
+      activeFrameRatio: totalFrames > 0 ? activeFrames / totalFrames : 0,
+      speechLikeFrameRatio: totalFrames > 0 ? speechLikeFrames / totalFrames : 0,
+      noiseFloorRms,
+      dynamicRangeRatio: highFrameRms / Math.max(noiseFloorRms, 1e-9),
+      rmsVariation: Math.sqrt(frameRmsVariance) / Math.max(averageFrameRms, 1e-9)
+    };
+  }
+
+  private async readWavPcmInfo(audioPath: string): Promise<WavPcmInfo | undefined> {
+    const handle = await open(audioPath, 'r').catch(() => undefined);
+
+    if (!handle) {
+      return undefined;
+    }
+
+    try {
+      const stats = await handle.stat();
+
+      if (stats.size < 44) {
+        return undefined;
+      }
+
+      const header = Buffer.alloc(12);
+      const headerRead = await handle.read(header, 0, header.byteLength, 0);
+
+      if (
+        headerRead.bytesRead !== header.byteLength ||
+        header.toString('ascii', 0, 4) !== 'RIFF' ||
+        header.toString('ascii', 8, 12) !== 'WAVE'
+      ) {
+        return undefined;
+      }
+
+      let offset = 12;
+      let format:
+        | {
+            audioFormat: number;
+            channels: number;
+            sampleRate: number;
+            bitsPerSample: number;
+            blockAlign: number;
+          }
+        | undefined;
+      let dataOffset = 0;
+      let dataBytes = 0;
+
+      while (offset + 8 <= stats.size && offset < WAV_HEADER_SCAN_LIMIT_BYTES) {
+        const chunkHeader = Buffer.alloc(8);
+        const chunkHeaderRead = await handle.read(chunkHeader, 0, chunkHeader.byteLength, offset);
+
+        if (chunkHeaderRead.bytesRead !== chunkHeader.byteLength) {
+          break;
+        }
+
+        const chunkId = chunkHeader.toString('ascii', 0, 4);
+        const chunkSize = chunkHeader.readUInt32LE(4);
+        const chunkDataOffset = offset + 8;
+
+        if (chunkId === 'fmt ') {
+          const formatBuffer = Buffer.alloc(Math.min(chunkSize, 40));
+          const formatRead = await handle.read(formatBuffer, 0, formatBuffer.byteLength, chunkDataOffset);
+
+          if (formatRead.bytesRead >= 16) {
+            format = {
+              audioFormat: formatBuffer.readUInt16LE(0),
+              channels: formatBuffer.readUInt16LE(2),
+              sampleRate: formatBuffer.readUInt32LE(4),
+              blockAlign: formatBuffer.readUInt16LE(12),
+              bitsPerSample: formatBuffer.readUInt16LE(14)
+            };
+          }
+        } else if (chunkId === 'data') {
+          dataOffset = chunkDataOffset;
+          dataBytes = Math.max(0, Math.min(chunkSize, stats.size - chunkDataOffset));
+        }
+
+        if (format && dataBytes > 0) {
+          break;
+        }
+
+        offset = chunkDataOffset + chunkSize + (chunkSize % 2);
+      }
+
+      if (
+        !format ||
+        dataBytes <= 0 ||
+        format.channels <= 0 ||
+        format.sampleRate <= 0 ||
+        format.blockAlign <= 0 ||
+        !this.isSupportedPcmFormat(format.audioFormat, format.bitsPerSample)
+      ) {
+        return undefined;
+      }
+
+      return {
+        dataOffset,
+        dataBytes,
+        ...format
+      };
+    } finally {
+      await handle.close();
+    }
+  }
+
+  private isSupportedPcmFormat(audioFormat: number, bitsPerSample: number): boolean {
+    return (audioFormat === 1 && [8, 16, 24, 32].includes(bitsPerSample)) || (audioFormat === 3 && bitsPerSample === 32);
+  }
+
+  private readNormalizedPcmSample(buffer: Buffer, offset: number, info: WavPcmInfo): number {
+    if (info.audioFormat === 3 && info.bitsPerSample === 32) {
+      return Math.max(-1, Math.min(1, buffer.readFloatLE(offset)));
+    }
+
+    if (info.bitsPerSample === 8) {
+      return (buffer.readUInt8(offset) - 128) / 128;
+    }
+
+    if (info.bitsPerSample === 16) {
+      return buffer.readInt16LE(offset) / 32768;
+    }
+
+    if (info.bitsPerSample === 24) {
+      return buffer.readIntLE(offset, 3) / 8388608;
+    }
+
+    return buffer.readInt32LE(offset) / 2147483648;
   }
 
   private shouldUseChunkedFinalTranscription(request: OfflineTranscriptionRequest): boolean {
@@ -288,6 +661,19 @@ export class LocalTranscriptionService {
           audioDurationMs: chunkDurationMs
         };
         try {
+          if (await this.shouldSkipSilentTranscription(chunkPath)) {
+            onProgress?.({
+              sessionId: request.sessionId,
+              mode: 'final',
+              stage: 'done',
+              progress: this.mapChunkProgress(chunkIndex, chunkCount, 100),
+              message: `구간 ${chunkIndex + 1}/${chunkCount} · 음성이 없어 건너뜀`,
+              workerId: SILENCE_GATE_WORKER_ID,
+              workerLabel: SILENCE_GATE_WORKER_LABEL
+            });
+            continue;
+          }
+
           const chunkResult = await this.getFinalWorker().transcribe(
             {
               request: chunkRequest,
@@ -571,6 +957,7 @@ export class LocalTranscriptionService {
   // 상주 worker가 모델을 한 번 로드할 때 필요한 실행 인자를 구성한다.
   private createPersistentWorkerArgs(assetRoot: string, purpose: TranscriptionWorkerPurpose): string[] {
     const useFinalQualityModel = purpose === 'preview';
+    const whisperCppModelPath = this.getWhisperCppModelPath(assetRoot);
     const args = [
       '--model',
       this.getWhisperModelPath(assetRoot, purpose, useFinalQualityModel),
@@ -589,9 +976,10 @@ export class LocalTranscriptionService {
       '--whisper-cpp-binary',
       this.getWhisperCppBinaryPath(),
       '--whisper-cpp-model',
-      this.getWhisperCppModelPath(assetRoot)
+      whisperCppModelPath
     ];
 
+    this.appendOptionalArg(args, '--whisper-cpp-dtw-preset', this.getWhisperCppDtwPreset(whisperCppModelPath));
     this.appendOptionalArg(args, '--threads', this.getPersistentThreadCount(purpose));
     this.appendOptionalArg(args, '--cluster-threshold', process.env.MEETING_RECORDER_DIARIZATION_CLUSTER_THRESHOLD);
     this.appendOptionalArg(args, '--diarization-min-turn-ms', process.env.MEETING_RECORDER_DIARIZATION_MIN_TURN_MS);
@@ -801,6 +1189,31 @@ export class LocalTranscriptionService {
     return path.join(assetRoot, 'whisper.cpp/ggml-large-v3.bin');
   }
 
+  private getWhisperCppDtwPreset(modelPath: string): string | undefined {
+    if (process.env.MEETING_RECORDER_WHISPER_CPP_DTW_PRESET) {
+      return process.env.MEETING_RECORDER_WHISPER_CPP_DTW_PRESET;
+    }
+
+    const normalizedName = path.basename(modelPath).toLowerCase().replace(/_/g, '-');
+    const presetByName: Array<[string, string]> = [
+      ['large-v3-turbo', 'large.v3.turbo'],
+      ['large-v3', 'large.v3'],
+      ['large-v2', 'large.v2'],
+      ['large-v1', 'large.v1'],
+      ['large', 'large.v3'],
+      ['medium.en', 'medium.en'],
+      ['medium', 'medium'],
+      ['small.en', 'small.en'],
+      ['small', 'small'],
+      ['base.en', 'base.en'],
+      ['base', 'base'],
+      ['tiny.en', 'tiny.en'],
+      ['tiny', 'tiny']
+    ];
+
+    return presetByName.find(([marker]) => normalizedName.includes(marker))?.[1];
+  }
+
   private getWorkerDevice(purpose: TranscriptionWorkerPurpose): string {
     if (purpose === 'preview' && process.env.MEETING_RECORDER_STT_PREVIEW_DEVICE) {
       return process.env.MEETING_RECORDER_STT_PREVIEW_DEVICE;
@@ -831,6 +1244,23 @@ export class LocalTranscriptionService {
     if (value) {
       args.push(key, value);
     }
+  }
+
+  private getNumericEnv(key: string, fallback: number): number {
+    const value = Number(process.env[key]);
+    return Number.isFinite(value) ? value : fallback;
+  }
+
+  private calculatePercentile(values: number[], percentile: number): number {
+    if (values.length === 0) {
+      return 0;
+    }
+
+    const sortedValues = [...values].sort((left, right) => left - right);
+    const clampedPercentile = Math.max(0, Math.min(1, percentile));
+    const index = Math.min(sortedValues.length - 1, Math.floor((sortedValues.length - 1) * clampedPercentile));
+
+    return sortedValues[index];
   }
 
   // 미리보기 전사는 작은 배치로 돌리고, 최종 전사는 WhisperX 기본 배치를 사용한다.
