@@ -1,8 +1,8 @@
+import { randomUUID } from 'node:crypto';
 import { copyFile, mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import type { RecoverableRecordingFile } from './recordingFileService';
 import type {
-  AudioFilePayload,
   DeleteSessionResult,
   MeetingSession,
   MeetingSessionSummary,
@@ -103,6 +103,10 @@ export class MeetingSessionStore {
     const session = request.session;
     assertSafeSessionId(session.id);
 
+    if (session.audioFileName && !isSafeAudioFileName(session.audioFileName)) {
+      throw new Error('잘못된 녹음 파일명입니다.');
+    }
+
     const sessionDirectory = this.getSessionDirectory(session.id);
     await mkdir(sessionDirectory, { recursive: true });
 
@@ -117,13 +121,19 @@ export class MeetingSessionStore {
     });
 
     if (audioFilePath) {
-      const audioPath = path.join(sessionDirectory, normalizedSession.audioFileName ?? getAudioFileName(request.audioMimeType));
-      await copyFile(audioFilePath, audioPath);
+      const audioPath = this.getAudioFilePath(
+        normalizedSession.id,
+        normalizedSession.audioFileName ?? getAudioFileName(request.audioMimeType)
+      );
+      await copyFileAtomically(audioFilePath, audioPath);
     }
 
     if (request.audioData) {
-      const audioPath = path.join(sessionDirectory, normalizedSession.audioFileName ?? getAudioFileName(request.audioMimeType));
-      await writeFile(audioPath, Buffer.from(request.audioData));
+      const audioPath = this.getAudioFilePath(
+        normalizedSession.id,
+        normalizedSession.audioFileName ?? getAudioFileName(request.audioMimeType)
+      );
+      await writeBinaryFileAtomically(audioPath, Buffer.from(request.audioData));
     }
 
     await this.writeSession(normalizedSession);
@@ -213,25 +223,6 @@ export class MeetingSessionStore {
     await writeFile(targetPath, formatTranscriptDocument(session), 'utf-8');
   }
 
-  // 저장된 녹음 파일을 렌더러가 재생할 수 있도록 바이트로 읽어 반환한다.
-  async getAudioFile(sessionId: string): Promise<AudioFilePayload | null> {
-    assertSafeSessionId(sessionId);
-    const session = await this.readSession(sessionId);
-
-    if (!session?.audioFileName) {
-      return null;
-    }
-
-    const audioPath = path.join(this.getSessionDirectory(session.id), session.audioFileName);
-    const audioData = await readFile(audioPath);
-
-    return {
-      fileName: session.audioFileName,
-      audioMimeType: session.audioMimeType,
-      audioData: new Uint8Array(audioData)
-    };
-  }
-
   async getAudioFileReference(sessionId: string): Promise<StoredSessionAudioFile> {
     assertSafeSessionId(sessionId);
     const session = await this.readSession(sessionId);
@@ -241,7 +232,7 @@ export class MeetingSessionStore {
     }
 
     return {
-      filePath: path.join(this.getSessionDirectory(session.id), session.audioFileName),
+      filePath: this.getAudioFilePath(sessionId, session.audioFileName),
       audioMimeType: session.audioMimeType ?? getAudioFileMimeType(session.audioFileName),
       durationMs: session.durationMs
     };
@@ -256,7 +247,7 @@ export class MeetingSessionStore {
       throw new Error('내보낼 녹음 파일이 없습니다.');
     }
 
-    await copyFile(path.join(this.getSessionDirectory(session.id), session.audioFileName), targetPath);
+    await copyFile(this.getAudioFilePath(sessionId, session.audioFileName), targetPath);
   }
 
   // 세션 폴더 전체를 삭제해 녹음 파일, JSON, 텍스트 스냅샷을 함께 제거한다.
@@ -276,24 +267,66 @@ export class MeetingSessionStore {
     return path.join(this.getSessionDirectory(id), SESSION_FILE_NAME);
   }
 
-  // 파일이 없거나 손상된 세션은 목록에서 조용히 제외한다.
+  // 세션 폴더 안의 안전한 오디오 파일 경로만 반환한다.
+  private getAudioFilePath(id: string, audioFileName: string): string {
+    assertSafeSessionId(id);
+    assertSafeAudioFileName(audioFileName);
+
+    const sessionDirectory = path.resolve(this.getSessionDirectory(id));
+    const audioPath = path.resolve(sessionDirectory, audioFileName);
+
+    if (path.dirname(audioPath) !== sessionDirectory) {
+      throw new Error('잘못된 녹음 파일 경로입니다.');
+    }
+
+    return audioPath;
+  }
+
+  // 파일이 없거나 손상된 세션은 제외하되 원인을 진단 로그로 남긴다.
   private async readSession(id: string): Promise<MeetingSession | null> {
     try {
       assertSafeSessionId(id);
       const raw = await readFile(this.getSessionFilePath(id), 'utf-8');
-      return normalizeSession(JSON.parse(raw) as MeetingSession);
-    } catch {
+      const storedSession = JSON.parse(raw) as MeetingSession;
+
+      if (!storedSession || typeof storedSession !== 'object' || storedSession.id !== id) {
+        throw new Error('세션 ID가 폴더 ID와 일치하지 않습니다.');
+      }
+
+      const session = normalizeSession(storedSession);
+
+      if (storedSession.audioFileName && storedSession.audioFileName !== session.audioFileName) {
+        console.warn(
+          `[MeetingSessionStore] 세션 ${JSON.stringify(id)}의 안전하지 않은 audioFileName을 ${JSON.stringify(
+            session.audioFileName
+          )}(으)로 정규화했습니다.`
+        );
+      }
+
+      return session;
+    } catch (error) {
+      if (isFileNotFoundError(error)) {
+        return null;
+      }
+
+      console.warn(
+        `[MeetingSessionStore] 세션 ${JSON.stringify(id)}을(를) 읽지 못했습니다: ${describeError(error)}`
+      );
       return null;
     }
   }
 
   // 세션 JSON과 사람이 읽는 텍스트 파일을 동일한 내용으로 저장한다.
   private async writeSession(session: MeetingSession): Promise<void> {
-    await writeFile(this.getSessionFilePath(session.id), JSON.stringify(session, null, 2), 'utf-8');
-    await writeFile(
-      path.join(this.getSessionDirectory(session.id), TRANSCRIPT_FILE_NAME),
-      formatTranscriptDocument(session),
-      'utf-8'
+    assertSafeSessionId(session.id);
+    const normalizedSession = normalizeSession(session);
+    const serializedSession = JSON.stringify(normalizedSession, null, 2);
+    const transcriptDocument = formatTranscriptDocument(normalizedSession);
+
+    await writeTextFileAtomically(this.getSessionFilePath(normalizedSession.id), serializedSession);
+    await writeTextFileAtomically(
+      path.join(this.getSessionDirectory(normalizedSession.id), TRANSCRIPT_FILE_NAME),
+      transcriptDocument
     );
   }
 }
@@ -316,6 +349,7 @@ function toSummary(session: MeetingSession): MeetingSessionSummary {
 function normalizeSession(session: MeetingSession): MeetingSession {
   const normalizedSession = {
     ...session,
+    audioFileName: normalizeAudioFileName(session.audioFileName),
     segments: (session.segments ?? []).map((segment) => ({ ...segment, memo: segment.memo ?? '' })),
     memo: session.memo ?? '',
     transcriptText: session.transcriptText ?? ''
@@ -325,6 +359,36 @@ function normalizeSession(session: MeetingSession): MeetingSession {
     ...normalizedSession,
     transcriptText: normalizedSession.transcriptText || buildTranscriptText(normalizedSession)
   };
+}
+
+// 이전 버전이 저장한 경로 포함 파일명도 세션 폴더 안의 베이스 파일명으로 정규화한다.
+function normalizeAudioFileName(audioFileName: unknown): string | undefined {
+  if (typeof audioFileName !== 'string' || audioFileName.includes('\0')) {
+    return undefined;
+  }
+
+  const fileName = path.posix.basename(audioFileName.replace(/\\/g, '/'));
+  return isSafeAudioFileName(fileName) ? fileName : undefined;
+}
+
+function assertSafeAudioFileName(fileName: string): void {
+  if (!isSafeAudioFileName(fileName)) {
+    throw new Error('잘못된 녹음 파일명입니다.');
+  }
+}
+
+function isSafeAudioFileName(fileName: unknown): fileName is string {
+  return (
+    typeof fileName === 'string' &&
+    fileName.length > 0 &&
+    fileName !== '.' &&
+    fileName !== '..' &&
+    !fileName.includes('\0') &&
+    !/[\\/]/.test(fileName) &&
+    !path.posix.isAbsolute(fileName) &&
+    !path.win32.isAbsolute(fileName) &&
+    /\.(wav|webm|mp4|m4a)$/i.test(fileName)
+  );
 }
 
 function getAudioFileName(mimeType?: string): string {
@@ -349,6 +413,48 @@ function getAudioFileMimeType(fileName: string): string {
   }
 
   return 'audio/webm';
+}
+
+// 완성된 내용이 중간 상태로 노출되지 않도록 같은 폴더에 쓴 뒤 원자적으로 교체한다.
+async function writeTextFileAtomically(targetPath: string, contents: string): Promise<void> {
+  await replaceFileAtomically(targetPath, (temporaryPath) => writeFile(temporaryPath, contents, 'utf-8'));
+}
+
+async function writeBinaryFileAtomically(targetPath: string, contents: Buffer): Promise<void> {
+  await replaceFileAtomically(targetPath, (temporaryPath) => writeFile(temporaryPath, contents));
+}
+
+async function copyFileAtomically(sourcePath: string, targetPath: string): Promise<void> {
+  await replaceFileAtomically(targetPath, (temporaryPath) => copyFile(sourcePath, temporaryPath));
+}
+
+async function replaceFileAtomically(
+  targetPath: string,
+  writeTemporaryFile: (temporaryPath: string) => Promise<void>
+): Promise<void> {
+  const temporaryPath = path.join(
+    path.dirname(targetPath),
+    `.${path.basename(targetPath)}.${process.pid}.${randomUUID()}.tmp`
+  );
+  let renamed = false;
+
+  try {
+    await writeTemporaryFile(temporaryPath);
+    await rename(temporaryPath, targetPath);
+    renamed = true;
+  } finally {
+    if (!renamed) {
+      try {
+        await rm(temporaryPath, { force: true });
+      } catch (error) {
+        console.warn(
+          `[MeetingSessionStore] 임시 파일 ${JSON.stringify(temporaryPath)}을(를) 정리하지 못했습니다: ${describeError(
+            error
+          )}`
+        );
+      }
+    }
+  }
 }
 
 async function moveFile(sourcePath: string, targetPath: string): Promise<void> {
@@ -389,6 +495,24 @@ function buildRecoveredSessionTitle(startedAt: string): string {
     hour: '2-digit',
     minute: '2-digit'
   })}`;
+}
+
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    const errorCode = 'code' in error ? String((error as NodeJS.ErrnoException).code) : undefined;
+    return errorCode ? `${error.name} [${errorCode}]: ${error.message}` : `${error.name}: ${error.message}`;
+  }
+
+  return String(error);
+}
+
+function isFileNotFoundError(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    'code' in error &&
+    (error as NodeJS.ErrnoException).code === 'ENOENT'
+  );
 }
 
 // 세션 ID가 경로 밖으로 나가지 못하도록 허용 문자를 제한한다.
