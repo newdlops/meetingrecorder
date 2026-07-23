@@ -5,8 +5,8 @@
 ## 현재 세팅
 
 - Electron + React + TypeScript + electron-vite
-- 마이크 녹음: 브라우저 `MediaRecorder` 기반
-- 전사/화자분리: 로컬 `WhisperX + pyannote.audio` worker 기반
+- 마이크 녹음: Web Audio 기반 16 kHz mono PCM WAV 스트리밍 저장
+- 전사/화자분리: 로컬 `WhisperX` 또는 `whisper.cpp` + `sherpa-onnx` worker 기반
 - 저장: Electron 메인 프로세스가 앱 데이터 폴더에 오디오와 회의 JSON, 텍스트 스냅샷 저장
 - 목록: 저장된 회의 목록 조회, 상세 보기, 화자명 수정, 텍스트 내보내기
 
@@ -16,6 +16,14 @@
 npm install
 npm run build:system-audio
 npm run dev
+```
+
+기본 회귀 검사는 아래 명령으로 실행합니다.
+
+```bash
+npm test
+npm run typecheck
+npm run verify:engine-bundle
 ```
 
 시스템 오디오 권한 팝업 없이 UI와 전사 저장 흐름만 개발 테스트할 때는 mock 시스템 오디오 모드를 사용합니다.
