@@ -1,5 +1,18 @@
 #!/usr/bin/env node
-import { copyFileSync, chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 'node:fs';
+import {
+  closeSync,
+  copyFileSync,
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync
+} from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
 import { cpus, tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -7,12 +20,23 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const version = process.env.MEETING_RECORDER_WHISPER_CPP_VERSION ?? 'v1.9.0';
+const defaultSourceArchiveUrl = `https://github.com/ggml-org/whisper.cpp/archive/refs/tags/${version}.tar.gz`;
 const sourceArchiveUrl =
   process.env.MEETING_RECORDER_WHISPER_CPP_SOURCE_URL ??
-  `https://github.com/ggml-org/whisper.cpp/archive/refs/tags/${version}.tar.gz`;
+  defaultSourceArchiveUrl;
+const defaultModelUrl =
+  'https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-large-v3.bin';
 const modelUrl =
   process.env.MEETING_RECORDER_WHISPER_CPP_MODEL_URL ??
-  'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3.bin';
+  defaultModelUrl;
+const modelSha256 =
+  process.env.MEETING_RECORDER_WHISPER_CPP_MODEL_SHA256 ??
+  (modelUrl === defaultModelUrl ? '64d182b440b98d5203c4f9bd541544d84c605196c4f7b845dfa11fb23594d1e2' : undefined);
+const sourceSha256 =
+  process.env.MEETING_RECORDER_WHISPER_CPP_SOURCE_SHA256 ??
+  (version === 'v1.9.0' && sourceArchiveUrl === defaultSourceArchiveUrl
+    ? '58252617f539320c42f8f40052433bce0556f78977d3f47f0ddcfe31a4722146'
+    : undefined);
 const executableName = process.platform === 'win32' ? 'whisper-cli.exe' : 'whisper-cli';
 const bundledBinaryPath = path.join(repoRoot, 'engines/whisper.cpp/bin', executableName);
 const bundledLibraryDirectory = path.join(repoRoot, 'engines/whisper.cpp/lib');
@@ -36,6 +60,16 @@ function assertCommand(command, installHint) {
   if (result.status !== 0) {
     throw new Error(`${command} is required. ${installHint}`);
   }
+}
+
+function captureCommand(command, args) {
+  const result = spawnSync(command, args, { encoding: 'utf-8' });
+
+  if (result.status !== 0) {
+    throw new Error(`${command} ${args.join(' ')} failed`);
+  }
+
+  return result.stdout;
 }
 
 function fileExists(filePath, minBytes = 1) {
@@ -68,10 +102,56 @@ function executableRuns(filePath) {
   return result.status === 0;
 }
 
-function downloadFile(url, targetPath, description) {
+function calculateFileSha256(filePath) {
+  const hash = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  const descriptor = openSync(filePath, 'r');
+
+  try {
+    let bytesRead = 0;
+
+    do {
+      bytesRead = readSync(descriptor, buffer, 0, buffer.length, null);
+
+      if (bytesRead > 0) {
+        hash.update(buffer.subarray(0, bytesRead));
+      }
+    } while (bytesRead > 0);
+  } finally {
+    closeSync(descriptor);
+  }
+
+  return hash.digest('hex');
+}
+
+function verifyFileSha256(filePath, expectedSha256, description) {
+  if (!expectedSha256) {
+    throw new Error(`${description} SHA-256 is required for a custom URL or version`);
+  }
+
+  const actualSha256 = calculateFileSha256(filePath);
+
+  if (actualSha256 !== expectedSha256) {
+    throw new Error(
+      `${description} checksum mismatch: expected ${expectedSha256}, got ${actualSha256}`
+    );
+  }
+}
+
+function downloadFile(url, targetPath, description, expectedSha256) {
+  if (!expectedSha256) {
+    throw new Error(`${description} SHA-256 is required for a custom URL or version`);
+  }
+
   if (fileExists(targetPath, 1024 * 1024)) {
-    console.log(`skip ${description}: ${path.relative(repoRoot, targetPath)}`);
-    return;
+    try {
+      verifyFileSha256(targetPath, expectedSha256, description);
+      console.log(`skip ${description}: ${path.relative(repoRoot, targetPath)}`);
+      return;
+    } catch {
+      console.log(`redownload ${description}: checksum mismatch`);
+      rmSync(targetPath, { force: true });
+    }
   }
 
   assertCommand('curl', 'Install curl or provide a local file.');
@@ -93,8 +173,44 @@ function downloadFile(url, targetPath, description) {
     args.push('--header', `Authorization: Bearer ${process.env.HF_TOKEN}`);
   }
 
-  args.push('--output', targetPath, url);
-  run('curl', args);
+  const temporaryPath = `${targetPath}.${process.pid}.${randomUUID()}.download`;
+  rmSync(temporaryPath, { force: true });
+
+  try {
+    args.push('--output', temporaryPath, url);
+    run('curl', args);
+    verifyFileSha256(temporaryPath, expectedSha256, description);
+    renameSync(temporaryPath, targetPath);
+  } finally {
+    rmSync(temporaryPath, { force: true });
+  }
+}
+
+function validateTarArchive(archivePath) {
+  const entries = captureCommand('tar', ['-tzf', archivePath]).split(/\r?\n/).filter(Boolean);
+  const verboseEntries = captureCommand('tar', ['-tvzf', archivePath]).split(/\r?\n/).filter(Boolean);
+
+  if (entries.length === 0 || entries.length !== verboseEntries.length) {
+    throw new Error('whisper.cpp source archive has an invalid file listing');
+  }
+
+  for (const [index, entryName] of entries.entries()) {
+    const parts = entryName.split('/').filter(Boolean);
+    const strippedName = parts.slice(1).join('/');
+    const normalizedName = path.posix.normalize(strippedName || '.');
+    const entryType = verboseEntries[index]?.[0];
+
+    if (
+      entryName.startsWith('/') ||
+      parts.includes('..') ||
+      path.posix.isAbsolute(normalizedName) ||
+      normalizedName === '..' ||
+      normalizedName.startsWith('../') ||
+      (entryType !== '-' && entryType !== 'd')
+    ) {
+      throw new Error(`unsafe whisper.cpp source archive entry: ${entryName}`);
+    }
+  }
 }
 
 function copyBundledBinary(sourcePath) {
@@ -198,7 +314,8 @@ function buildWhisperCpp() {
 
   rmSync(workRoot, { recursive: true, force: true });
   mkdirSync(sourceDirectory, { recursive: true });
-  downloadFile(sourceArchiveUrl, archivePath, `whisper.cpp ${version} source`);
+  downloadFile(sourceArchiveUrl, archivePath, `whisper.cpp ${version} source`, sourceSha256);
+  validateTarArchive(archivePath);
   run('tar', ['-xzf', archivePath, '-C', sourceDirectory, '--strip-components', '1']);
   run('cmake', ['-S', sourceDirectory, '-B', buildDirectory, '-DCMAKE_BUILD_TYPE=Release']);
   run('cmake', ['--build', buildDirectory, '--config', 'Release', '-j', String(Math.max(1, cpus().length - 1))]);
@@ -234,7 +351,7 @@ function main() {
   if (!executableRuns(bundledBinaryPath)) {
     throw new Error(`bundled whisper.cpp binary is not runnable: ${path.relative(repoRoot, bundledBinaryPath)}`);
   }
-  downloadFile(modelUrl, bundledModelPath, 'whisper.cpp full precision large-v3 model');
+  downloadFile(modelUrl, bundledModelPath, 'whisper.cpp full precision large-v3 model', modelSha256);
   console.log('whisper.cpp bundle ready');
 }
 

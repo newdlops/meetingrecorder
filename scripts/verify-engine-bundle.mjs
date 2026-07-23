@@ -182,6 +182,43 @@ function verifyPythonPackages() {
   }
 }
 
+function verifyPythonPackageVersions() {
+  const pythonPath = resolvePath(
+    process.platform === 'win32' ? '.venv-stt/Scripts/python.exe' : '.venv-stt/bin/python'
+  );
+  const lockPath = resolvePath('engines/offline-whisperx/requirements-lock.txt');
+
+  if (!existsSync(pythonPath) || !existsSync(lockPath)) {
+    return;
+  }
+
+  const verificationScript = [
+    'import importlib.metadata as metadata',
+    'import pathlib',
+    'import sys',
+    'errors = []',
+    'for line in pathlib.Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():',
+    '    value = line.strip()',
+    '    if not value or value.startswith("#"):',
+    '        continue',
+    '    name, expected = value.split("==", 1)',
+    '    try:',
+    '        actual = metadata.version(name)',
+    '    except metadata.PackageNotFoundError:',
+    '        errors.append(f"{name}: missing (expected {expected})")',
+    '        continue',
+    '    if actual != expected:',
+    '        errors.append(f"{name}: {actual} (expected {expected})")',
+    'print("\\n".join(errors))',
+    'raise SystemExit(1 if errors else 0)'
+  ].join('\n');
+  const result = spawnSync(pythonPath, ['-c', verificationScript, lockPath], { encoding: 'utf-8' });
+
+  if (result.status !== 0) {
+    addError(`Python packages do not match requirements-lock.txt:\n${result.stdout.trim() || result.stderr.trim()}`);
+  }
+}
+
 function verifyEngineFiles() {
   requireFile('engines/offline-whisperx/persistent_worker.py');
   requireFile('engines/offline-whisperx/worker.py');
@@ -189,6 +226,7 @@ function verifyEngineFiles() {
   requireFile('engines/offline-whisperx/quality_transcription.py');
   requireFile('engines/offline-whisperx/whisper_cpp_transcription.py');
   requireFile('engines/offline-whisperx/requirements.txt');
+  requireFile('engines/offline-whisperx/requirements-lock.txt');
   requireFile(whisperCppBinaryRelativePath, { executable: true, minBytes: 1024 });
   requireExecutableRuns(whisperCppBinaryRelativePath);
 }
@@ -217,6 +255,7 @@ function verifyPackagingConfig() {
 
 verifyPythonRuntime();
 verifyPythonPackages();
+verifyPythonPackageVersions();
 verifyEngineFiles();
 verifyModelFiles();
 verifyPackagingConfig();

@@ -1,2 +1,2 @@
-whisperx
-sherpa-onnx>=1.10.28
+whisperx==3.8.6
+sherpa-onnx==1.13.3

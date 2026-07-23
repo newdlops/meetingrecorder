@@ -16,6 +16,8 @@ npm run build:prod
 
 `build:prod`는 `.venv-stt` Python 엔진, `engines/models` 모델 자산, `whisper.cpp` 바이너리를 먼저 준비한 뒤 `verify:engine-bundle`로 누락 여부를 검사합니다. 검증을 통과한 자산은 Electron 앱의 resources 폴더에 포함되므로 최종 사용자는 Python, STT 모델, 화자분리 모델을 별도로 설치하지 않습니다.
 
+배포용 Python 환경은 Python 3.11과 `requirements-lock.txt`의 고정 버전을 사용합니다. 의존성을 갱신할 때는 호환성을 검증한 환경의 lock 파일도 함께 갱신해야 합니다.
+
 기본 전사 엔진은 기존 `WhisperX`입니다. `whisper.cpp`는 설정에서 추가로 선택할 수 있으며, 정확도 손실을 피하기 위해 setup 단계에서 quantized 모델이 아닌 full precision `large-v3` 모델을 준비합니다.
 
 ## 주요 환경변수
@@ -25,6 +27,8 @@ npm run build:prod
 - `MEETING_RECORDER_STT_DEVICE`: `cpu` 또는 `cuda`. 기본값: `cpu`
 - `MEETING_RECORDER_STT_COMPUTE_TYPE`: 기본값: `int8`
 - `MEETING_RECORDER_ENGINE_ASSET_ROOT`: standalone 모델 자산 루트. 기본값은 `engines/models`
+- `MEETING_RECORDER_WHISPER_REVISION`: 번들에 받을 faster-whisper 모델 revision. 기본값은 검증된 고정 revision
+- `MEETING_RECORDER_WHISPER_MODEL_SHA256`: faster-whisper repo/revision을 바꿀 때 필요한 `model.bin` SHA-256
 - `MEETING_RECORDER_STT_MODEL_DIR`: Whisper 모델 디렉터리. 기본값은 `engines/models/whisper`
 - `MEETING_RECORDER_STT_LANGUAGE`: 언어 고정값. 기본값은 한국어 `ko`
 - `MEETING_RECORDER_STT_TASK`: `transcribe` 또는 `translate`. 기본값은 한글 받아쓰기용 `transcribe`
@@ -34,6 +38,8 @@ npm run build:prod
 - `MEETING_RECORDER_STT_HOTWORDS`: 회사명, 제품명, 참석자명처럼 우선 고려할 쉼표 구분 키워드
 - `MEETING_RECORDER_STT_ALLOW_DOWNLOAD`: `1`이면 개발 중 모델 자동 다운로드를 허용. 기본값은 다운로드 금지
 - `MEETING_RECORDER_STT_TIMEOUT_MS`: 긴 회의 처리 타임아웃
+- `MEETING_RECORDER_WHISPER_CPP_MODEL_SHA256`: 기본 URL을 바꿀 때 사용할 whisper.cpp 모델 SHA-256
+- `MEETING_RECORDER_WHISPER_CPP_SOURCE_SHA256`: whisper.cpp 소스 URL/버전을 바꿀 때 사용할 SHA-256
 
 ## 한국어 품질 기준
 
