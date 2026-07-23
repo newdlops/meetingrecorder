@@ -384,7 +384,6 @@ export function App(): JSX.Element {
     transcriptionEngine: readStoredTranscriptionEngine(),
     transcriptionInferenceMode: readStoredTranscriptionInferenceMode()
   });
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [microphoneDevices, setMicrophoneDevices] = useState<MicrophoneDevice[]>([]);
   const [playingSegmentId, setPlayingSegmentId] = useState<string | null>(null);
   const [livePreviewProgress, setLivePreviewProgress] = useState<TranscriptionProgressEvent | null>(null);
@@ -402,6 +401,9 @@ export function App(): JSX.Element {
   const [appError, setAppError] = useState<string | null>(null);
 
   const activeSession = draftSession ?? selectedSession;
+  const audioUrl = selectedSession?.audioFileName && !draftSession
+    ? window.meetingRecorder.getAudioUrl(selectedSession.id)
+    : null;
   const isBusy = isSaving || isReprocessing || isStoppingAfterLivePreviewDrain;
   const visibleStatus: RecordingStatus = isBusy ? 'saving' : recordingStatus;
   const previewWorkerCount = normalizePreviewWorkerCount(recorderSettings.previewWorkerCount);
@@ -485,10 +487,6 @@ export function App(): JSX.Element {
   }, [recordingStatus]);
 
   useEffect(() => {
-    let objectUrl: string | null = null;
-    let canceled = false;
-
-    setAudioUrl(null);
     setPlayingSegmentId(null);
 
     if (segmentPlaybackTimeoutRef.current) {
@@ -497,42 +495,7 @@ export function App(): JSX.Element {
     }
 
     audioRef.current?.pause();
-
-    if (!selectedSession?.audioFileName || draftSession) {
-      return () => undefined;
-    }
-
-    window.meetingRecorder
-      .getAudioFile(selectedSession.id)
-      .then((payload) => {
-        if (!payload) {
-          return;
-        }
-
-        const audioData = payload.audioData instanceof Uint8Array ? payload.audioData : new Uint8Array(payload.audioData);
-        objectUrl = URL.createObjectURL(new Blob([audioData], { type: payload.audioMimeType ?? 'audio/webm' }));
-
-        if (canceled) {
-          URL.revokeObjectURL(objectUrl);
-          return;
-        }
-
-        setAudioUrl(objectUrl);
-      })
-      .catch((error) => {
-        if (!canceled) {
-          setAppError(error instanceof Error ? error.message : '녹음 파일을 불러오지 못했습니다.');
-        }
-      });
-
-    return () => {
-      canceled = true;
-
-      if (objectUrl) {
-        URL.revokeObjectURL(objectUrl);
-      }
-    };
-  }, [draftSession, selectedSession?.audioFileName, selectedSession?.id]);
+  }, [audioUrl]);
 
   useEffect(() => {
     return () => {
@@ -1527,6 +1490,7 @@ export function App(): JSX.Element {
               onWorkerCountChange={handlePreviewWorkerCountChange}
             />
             <SessionManagementPanel
+              audioUrl={audioUrl}
               allowDelete={Boolean(selectedSession && !draftSession && recordingStatus !== 'recording' && !isBusy)}
               canReprocess={Boolean(selectedSession?.audioFileName && !draftSession && recordingStatus !== 'recording')}
               disabled={isBusy}
@@ -1541,7 +1505,12 @@ export function App(): JSX.Element {
             <SpeakerEditor disabled={!activeSession || isBusy} session={activeSession} onRename={handleRenameSpeaker} />
           </div>
         </section>
-        <audio ref={audioRef} src={audioUrl ?? undefined} onEnded={() => setPlayingSegmentId(null)} />
+        <audio
+          preload="metadata"
+          ref={audioRef}
+          src={audioUrl ?? undefined}
+          onEnded={() => setPlayingSegmentId(null)}
+        />
       </main>
     </div>
   );

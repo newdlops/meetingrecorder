@@ -128,6 +128,8 @@ export function useRecorder() {
   const createProcessedStream = useCallback(
     async (stream: MediaStream, settings: RecorderSettings): Promise<MediaStream> => {
       const audioContext = new AudioContext();
+      // 이후 그래프 구성 단계가 실패해도 상위 정리 루틴이 context를 닫을 수 있어야 한다.
+      audioContextRef.current = audioContext;
       const source = audioContext.createMediaStreamSource(stream);
       const highPassFilter = audioContext.createBiquadFilter();
       const lowPassFilter = audioContext.createBiquadFilter();
@@ -164,7 +166,6 @@ export function useRecorder() {
       peakLimiter.connect(analyserNode);
       analyserNode.connect(destination);
 
-      audioContextRef.current = audioContext;
       gainNodeRef.current = gainNode;
       analyserNodeRef.current = analyserNode;
       processedAudioNodeRef.current = peakLimiter;
@@ -301,6 +302,97 @@ export function useRecorder() {
     processor.connect(audioContext.destination);
   }, [handlePcmSamples]);
 
+  const cleanupRecorderResources = useCallback(
+    async ({
+      elapsedMs: finalElapsedMs = 0,
+      preservePendingPcm = false,
+      stopSystemCapture = false,
+      updateState = true
+    }: {
+      elapsedMs?: number;
+      preservePendingPcm?: boolean;
+      stopSystemCapture?: boolean;
+      updateState?: boolean;
+    } = {}): Promise<void> => {
+      const processor = pcmProcessorRef.current;
+      const processedAudioNode = processedAudioNodeRef.current;
+
+      if (processor) {
+        processor.onaudioprocess = null;
+
+        try {
+          processedAudioNode?.disconnect(processor);
+        } catch {
+          // 이미 끊긴 Web Audio 노드는 별도 조치가 필요하지 않다.
+        }
+
+        try {
+          processor.disconnect();
+        } catch {
+          // 이미 끊긴 Web Audio 노드는 별도 조치가 필요하지 않다.
+        }
+      }
+
+      if (levelFrameRef.current !== null) {
+        window.cancelAnimationFrame(levelFrameRef.current);
+        levelFrameRef.current = null;
+      }
+
+      if (preservePendingPcm && !systemRecordingRef.current && recordingIdRef.current) {
+        flushRecordingPcm();
+      }
+
+      const pendingChunkWrites = chunkWriteQueueRef.current;
+      const audioContext = audioContextRef.current;
+      const stream = streamRef.current;
+      const shouldStopSystemCapture = stopSystemCapture && systemRecordingRef.current;
+      const systemRecordingId = recordingIdRef.current;
+
+      pcmProcessorRef.current = null;
+      audioContextRef.current = null;
+      gainNodeRef.current = null;
+      analyserNodeRef.current = null;
+      processedAudioNodeRef.current = null;
+      streamRef.current = null;
+      systemRecordingRef.current = false;
+      recordingIdRef.current = '';
+      livePreviewEnabledRef.current = false;
+      previewMarkerInFlightRef.current = false;
+      nextPreviewStartMsRef.current = 0;
+      recordingChunksRef.current = [];
+      recordingByteLengthRef.current = 0;
+      lastPcmFlushAtRef.current = 0;
+      chunkWriteQueueRef.current = Promise.resolve();
+      startedAtRef.current = 0;
+
+      stream?.getTracks().forEach((track) => {
+        try {
+          track.stop();
+        } catch {
+          // 이미 종료된 트랙은 무시한다.
+        }
+      });
+
+      if (updateState) {
+        setElapsedMs(finalElapsedMs);
+        setInputLevel(0);
+        setStatus('idle');
+      }
+
+      await Promise.all([
+        pendingChunkWrites.catch(() => undefined),
+        audioContext?.close().catch(() => undefined) ?? Promise.resolve(),
+        shouldStopSystemCapture && systemRecordingId
+          ? window.meetingRecorder.stopSystemAudioCaptureToRecordingFile(systemRecordingId).then(
+              () => undefined,
+              () => undefined
+            )
+          : Promise.resolve()
+      ]);
+    },
+    [flushRecordingPcm]
+  );
+
   // 선택된 입력 권한을 요청하고 PCM WAV 녹음을 시작한다.
   const startRecording = useCallback(async (settings: RecorderSettings, recordingId: string): Promise<void> => {
     setError(null);
@@ -320,8 +412,9 @@ export function useRecorder() {
           audioMimeType: 'audio/wav',
           externalWriter: true
         });
-        await window.meetingRecorder.startSystemAudioCapture(recordingId);
+        // 시작 IPC가 실패하더라도 헬퍼가 남지 않도록 요청 시점부터 정리 대상으로 표시한다.
         systemRecordingRef.current = true;
+        await window.meetingRecorder.startSystemAudioCapture(recordingId);
         startedAtRef.current = Date.now();
         nextPreviewStartMsRef.current = 0;
         setElapsedMs(0);
@@ -331,9 +424,9 @@ export function useRecorder() {
       }
 
       const stream = await createMicrophoneInputStream(settings);
+      streamRef.current = stream;
       await createProcessedStream(stream, settings);
       await window.meetingRecorder.startRecordingFile({ recordingId, audioMimeType: 'audio/wav' });
-      streamRef.current = stream;
       startedAtRef.current = Date.now();
       nextPreviewStartMsRef.current = 0;
       setElapsedMs(0);
@@ -342,9 +435,9 @@ export function useRecorder() {
       startInputLevelMeter();
       setStatus('recording');
     } catch (recordingError) {
-      if (recordingIdRef.current) {
-        void window.meetingRecorder.discardRecordingFile(recordingIdRef.current);
-      }
+      const failedRecordingId = recordingIdRef.current || recordingId;
+      await cleanupRecorderResources({ stopSystemCapture: true });
+      await window.meetingRecorder.discardRecordingFile(failedRecordingId).catch(() => undefined);
 
       const message =
         recordingError instanceof Error ? recordingError.message : '녹음 권한을 확인할 수 없습니다.';
@@ -354,6 +447,7 @@ export function useRecorder() {
   }, [
     createMicrophoneInputStream,
     createProcessedStream,
+    cleanupRecorderResources,
     startPcmCapture,
     startInputLevelMeter
   ]);
@@ -364,9 +458,15 @@ export function useRecorder() {
       const fallbackDurationMs = Date.now() - startedAtRef.current;
       let resolvedDurationMs = fallbackDurationMs;
       const recordingId = recordingIdRef.current;
+      let systemCaptureStopped = false;
 
       try {
+        if (!recordingId) {
+          return null;
+        }
+
         const result = await window.meetingRecorder.stopSystemAudioCaptureToRecordingFile(recordingId);
+        systemCaptureStopped = true;
         const mimeType = result.audioMimeType || 'audio/wav';
         const durationMs = result.durationMs || fallbackDurationMs;
         resolvedDurationMs = durationMs;
@@ -377,34 +477,40 @@ export function useRecorder() {
           mimeType
         };
       } finally {
-        systemRecordingRef.current = false;
-        livePreviewEnabledRef.current = false;
-        previewMarkerInFlightRef.current = false;
-        nextPreviewStartMsRef.current = 0;
-        recordingIdRef.current = '';
-        recordingChunksRef.current = [];
-        recordingByteLengthRef.current = 0;
-        chunkWriteQueueRef.current = Promise.resolve();
-        setElapsedMs(resolvedDurationMs);
-        setInputLevel(0);
-        setStatus('idle');
+        await cleanupRecorderResources({
+          elapsedMs: resolvedDurationMs,
+          stopSystemCapture: !systemCaptureStopped
+        });
       }
     }
 
     const recordingId = recordingIdRef.current;
 
     if (!recordingId) {
-      setStatus('idle');
+      await cleanupRecorderResources({ stopSystemCapture: true });
       return null;
     }
 
     const durationMs = Date.now() - startedAtRef.current;
 
     try {
-      pcmProcessorRef.current?.disconnect();
-
       if (pcmProcessorRef.current) {
-        pcmProcessorRef.current.onaudioprocess = null;
+        const processor = pcmProcessorRef.current;
+        processor.onaudioprocess = null;
+
+        try {
+          processedAudioNodeRef.current?.disconnect(processor);
+        } catch {
+          // context가 먼저 중단된 경우에도 남은 PCM 저장과 파일 완료는 계속 시도한다.
+        }
+
+        try {
+          processor.disconnect();
+        } catch {
+          // context가 먼저 중단된 경우에도 남은 PCM 저장과 파일 완료는 계속 시도한다.
+        }
+
+        pcmProcessorRef.current = null;
       }
 
       flushRecordingPcm();
@@ -415,40 +521,16 @@ export function useRecorder() {
         durationMs
       });
 
-      if (levelFrameRef.current) {
-        window.cancelAnimationFrame(levelFrameRef.current);
-        levelFrameRef.current = null;
-      }
-
-      await audioContextRef.current?.close();
-      streamRef.current?.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-      pcmProcessorRef.current = null;
-      audioContextRef.current = null;
-      gainNodeRef.current = null;
-      analyserNodeRef.current = null;
-      processedAudioNodeRef.current = null;
-      recordingIdRef.current = '';
-      livePreviewEnabledRef.current = false;
-      previewMarkerInFlightRef.current = false;
-      nextPreviewStartMsRef.current = 0;
-      recordingChunksRef.current = [];
-      recordingByteLengthRef.current = 0;
-      chunkWriteQueueRef.current = Promise.resolve();
-      setElapsedMs(durationMs);
-      setInputLevel(0);
-      setStatus('idle');
-
       return {
         recordingId: recordingFile.recordingId,
         durationMs: recordingFile.durationMs,
         mimeType: recordingFile.audioMimeType
       };
-    } catch (error) {
-      setStatus('idle');
-      throw error;
+    } finally {
+      // 완료 IPC가 실패하면 파일을 삭제하지 않고 active 상태로 남겨 다음 실행에서 복구한다.
+      await cleanupRecorderResources({ elapsedMs: durationMs, preservePendingPcm: true });
     }
-  }, [flushRecordingPcm]);
+  }, [cleanupRecorderResources, flushRecordingPcm]);
 
   // 녹음을 끊지 않고 active 녹음 파일에서 전사 가능한 연속 marker 범위를 꺼낸다.
   const createRecordingSnapshot = useCallback(async (): Promise<RecordedAudio | null> => {
@@ -492,6 +574,18 @@ export function useRecorder() {
       previewMarkerInFlightRef.current = false;
     }
   }, [flushRecordingPcm]);
+
+  useEffect(() => {
+    return () => {
+      // 화면이 먼저 내려가도 캡처 장치는 즉시 해제하고, 녹음 파일은 복구 대상으로 보존한다.
+      void cleanupRecorderResources({
+        elapsedMs: Math.max(0, Date.now() - startedAtRef.current),
+        preservePendingPcm: true,
+        stopSystemCapture: true,
+        updateState: false
+      });
+    };
+  }, [cleanupRecorderResources]);
 
   return {
     status,

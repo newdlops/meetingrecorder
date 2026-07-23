@@ -4,6 +4,7 @@ import type { MeetingSession, SessionDetailsUpdateRequest, TranscriptionProgress
 
 interface SessionManagementPanelProps {
   session: MeetingSession | null;
+  audioUrl: string | null;
   disabled: boolean;
   allowDelete: boolean;
   canReprocess: boolean;
@@ -18,6 +19,7 @@ interface SessionManagementPanelProps {
 // 회의 제목, 원본 오디오, 전사 텍스트, 메모를 한곳에서 관리하는 패널이다.
 export function SessionManagementPanel({
   session,
+  audioUrl,
   disabled,
   allowDelete,
   canReprocess,
@@ -31,51 +33,12 @@ export function SessionManagementPanel({
   const [title, setTitle] = useState('');
   const [transcriptText, setTranscriptText] = useState('');
   const [memo, setMemo] = useState('');
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
 
   useEffect(() => {
     setTitle(session?.title ?? '');
     setTranscriptText(session?.transcriptText ?? '');
     setMemo(session?.memo ?? '');
   }, [session?.id, session?.memo, session?.title, session?.transcriptText]);
-
-  useEffect(() => {
-    let nextAudioUrl: string | null = null;
-    let isActive = true;
-
-    if (!session?.audioFileName) {
-      setAudioUrl(null);
-      return undefined;
-    }
-
-    // 저장된 오디오 바이트를 Blob URL로 바꿔 브라우저 audio 컨트롤에 연결한다.
-    window.meetingRecorder
-      .getAudioFile(session.id)
-      .then((payload) => {
-        if (!payload || !isActive) {
-          return;
-        }
-
-        const blob = new Blob([payload.audioData], {
-          type: payload.audioMimeType ?? session.audioMimeType ?? 'audio/webm'
-        });
-        nextAudioUrl = URL.createObjectURL(blob);
-        setAudioUrl(nextAudioUrl);
-      })
-      .catch(() => {
-        if (isActive) {
-          setAudioUrl(null);
-        }
-      });
-
-    return () => {
-      isActive = false;
-
-      if (nextAudioUrl) {
-        URL.revokeObjectURL(nextAudioUrl);
-      }
-    };
-  }, [session?.audioFileName, session?.audioMimeType, session?.id]);
 
   const hasChanges = useMemo(() => {
     return (
@@ -126,7 +89,7 @@ export function SessionManagementPanel({
           </label>
 
           <div className="audioBlock">
-            {audioUrl ? <audio controls src={audioUrl} /> : <p className="emptyText">녹음 파일 없음</p>}
+            {audioUrl ? <audio controls preload="metadata" src={audioUrl} /> : <p className="emptyText">녹음 파일 없음</p>}
             <div className="panelButtonGrid">
               <button className="ghostButton" disabled={!session.audioFileName} type="button" onClick={onExportAudio}>
                 <Download size={16} />
