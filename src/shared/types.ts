@@ -76,12 +76,6 @@ export interface ExportTranscriptResult {
   filePath?: string;
 }
 
-export interface AudioFilePayload {
-  fileName: string;
-  audioMimeType?: string;
-  audioData: Uint8Array;
-}
-
 export interface SystemAudioCaptureResult {
   audioData?: Uint8Array;
   audioMimeType: string;
@@ -182,7 +176,7 @@ export interface MeetingRecorderApi {
   updateSpeakerName(request: SpeakerUpdateRequest): Promise<MeetingSession>;
   updateSessionDetails(request: SessionDetailsUpdateRequest): Promise<MeetingSession>;
   updateSegmentMemo(request: SegmentMemoUpdateRequest): Promise<MeetingSession>;
-  getAudioFile(sessionId: string): Promise<AudioFilePayload | null>;
+  getAudioUrl(sessionId: string): string;
   exportAudio(sessionId: string): Promise<ExportTranscriptResult>;
   deleteSession(sessionId: string): Promise<DeleteSessionResult>;
   exportTranscript(sessionId: string): Promise<ExportTranscriptResult>;
@@ -191,10 +185,7 @@ export interface MeetingRecorderApi {
   completeRecordingFile(request: RecordingFileCompleteRequest): Promise<RecordingFileResult>;
   discardRecordingFile(recordingId: string): Promise<void>;
   startSystemAudioCapture(recordingId?: string): Promise<void>;
-  stopSystemAudioCapture(): Promise<SystemAudioCaptureResult>;
   stopSystemAudioCaptureToRecordingFile(recordingId: string): Promise<RecordingFileResult>;
-  createSystemAudioSnapshot(): Promise<SystemAudioCaptureResult | null>;
-  resetSystemAudioSnapshot(): Promise<void>;
   transcribeOffline(request: OfflineTranscriptionRequest): Promise<OfflineTranscriptionResult>;
   transcribeSessionAudio(request: SessionAudioTranscriptionRequest): Promise<OfflineTranscriptionResult>;
   onTranscriptionProgress(listener: (event: TranscriptionProgressEvent) => void): () => void;
